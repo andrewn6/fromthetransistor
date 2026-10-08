@@ -27,9 +27,11 @@ module ethernet (
 
   // addresses the CPU uses to reach each register
   localparam CTRL_ADDR = 32'h0000; // bit0 = start tx
-  localparam STATUS_ADDR = 32'h0004; // bit0 = tx_busy, bit1 = rx_ready
+  localparam STATUS_ADDR = 32'h0004; // bit0 = tx_busy, bit1 = rx_ready, bit2 = mdio_busy
   localparam TXLEN_ADDR = 32'h0008; // bytes to send
   localparam RXLEN_ADDR = 32'h000C; // bytes received
+  localparam MDIO_CTRL_ADDR = 32'h0010; // write a 32-bit mdio frame + go
+  localparam MDIO_DATA_ADDR = 32'h0014; // read: 16-bit value from the phy
   localparam TXBUF_BASE = 32'h1000; // fram bytes to send
   localparam RXBUF_BASE = 32'h2000; // received frame bytes
 
@@ -52,13 +54,19 @@ module ethernet (
     if (reset) begin
       tx_len <= 0;
       tx_start <= 0;
+      mdio_go <= 0;
 
     end else begin
       tx_start <= 0;
+      mdio_go  <= 0;              // one-shot, clears every tick
       if (wr_en) begin
           case (addr)
             CTRL_ADDR: tx_start <= data_in[0];
             TXLEN_ADDR: tx_len <= data_in[10:0];
+            MDIO_CTRL_ADDR: begin  // cpu loads a frame and says go
+              mdio_frame <= data_in;
+              mdio_go    <= 1;
+            end
             default: begin
               if (addr >= TXBUF_BASE && addr < TXBUF_BASE + BUF_SIZE)
                   tx_buf[addr - TXBUF_BASE] <= data_in[7:0];
@@ -72,8 +80,9 @@ module ethernet (
       data_out = 32'h0;
       if (rd_en) begin
           case(addr)
-              STATUS_ADDR: data_out = {30'b0, rx_ready, tx_busy};
+              STATUS_ADDR: data_out = {29'b0, mdio_busy, rx_ready, tx_busy};
               RXLEN_ADDR:  data_out = {21'b0, rx_len};
+              MDIO_DATA_ADDR: data_out = {16'b0, mdio_read_data};
               default: begin
                 if (addr >= RXBUF_BASE && addr < RXBUF_BASE + BUF_SIZE)
                     data_out = {24'b0, rx_buf[addr - RXBUF_BASE]};
@@ -234,9 +243,6 @@ always @(posedge clk or posedge reset) begin
 end
 
 // MDIO management 
-
-localparam MDIO_CTRL_ADDR = 32'h0010;
-localparam MDIO_DATA_ADDR = 32'h0014;
 
 reg mdio_go;
 reg [31:0] mdio_frame;
