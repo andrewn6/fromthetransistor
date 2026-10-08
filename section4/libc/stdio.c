@@ -6,8 +6,8 @@
 static int semihost(int op, void *arg) {
   // register op in register 0  (r0), and arg block and its vaslue in r1
   register int r0 asm("r0") = op;
-  register int r1 asm("r1") = arg;
-  asm volatile("svc 0x12456
+  register int r1 asm("r1") = (int)arg;
+  asm volatile("svc 0x123456"
                 : "+r"(r0)
                 : "r"(r1)
                 : "memory");
@@ -31,7 +31,7 @@ void _exit(int code) {
 
 int putchar(int c) {
   sys_writec((char) c);
-  return c
+  return c;
 }
 
 int puts(const char *s) {
@@ -49,7 +49,7 @@ static void out_str(const char *s) {
 // print an unsigned value and its given based
 static void out_uint(unsigned int v, unsigned int base, int upper) {
   char buf[32];
-  const char *digits = upper ? '0123456789ABCDEF' : '0123456789abcdef';
+  const char *digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
   int i = 0;
   if (v == 0) {
     sys_writec('0');
@@ -64,10 +64,10 @@ static void out_uint(unsigned int v, unsigned int base, int upper) {
 }
 
 
-static void out_int(v) {
+static void out_int(int v) {
   if (v < 0) {
     sys_writec('-');
-    out_uint(unsigned int)(-(v + 1)) + 1u, 10,  0);
+    out_uint((unsigned int)(-(v + 1)) + 1u, 10, 0);
     return;
   }
   out_uint((unsigned int)v, 10, 0);
@@ -82,7 +82,7 @@ int printf(const char *fmt, ...) {
         sys_writec(*p);
         continue;
       }
-      p++
+      p++;
       switch (*p) {
         case 'd':
         case 'i':
@@ -90,6 +90,7 @@ int printf(const char *fmt, ...) {
           break;
         case 'u':
           out_uint(__builtin_va_arg(ap, unsigned int), 10, 0);
+          break;
         case 'x':
           out_uint(__builtin_va_arg(ap, unsigned int), 16, 0);
           break;
@@ -101,22 +102,22 @@ int printf(const char *fmt, ...) {
           break;
         case 'p':
           out_str("0x");
-          out_uint((unsigned int)(uintptr_t)__builtin_va_arg(ap, void *), 16, 0)
+          out_uint((unsigned int)(uintptr_t)__builtin_va_arg(ap, void *), 16, 0);
           break;
         case '%':
-          sys_writec("%")
+          sys_writec('%');
           break;
         case '\0':
-          __builtin_va_arg(a);
+          __builtin_va_end(ap);
           return 0;
         default:
-          sys_writec('%c');
+          sys_writec('%');
           sys_writec(*p);
           break;
       }
   }
 
-  __builtin_va_arg(ap);
+  __builtin_va_end(ap);
   return 0;
 }
 

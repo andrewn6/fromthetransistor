@@ -22,7 +22,7 @@ int strncmp(const char *a, const char *b, size_t n) {
   for (size_t i = 0; i < n; i++) {
     if (a[i] != b[i])
       return (int)(uint8_t)a[i] - (int)(uint8_t)b[i];
-    if (a[0] == 0)
+    if (a[i] == 0)
       return 0;
   }
   return 0;

@@ -2,10 +2,10 @@
 
 void *memcpy(void *dst, const void *src, size_t n) {
   uint8_t *d = (uint8_t *)dst;
-  const uint8_t *s = (const uint8_t)src;
+  const uint8_t *s = (const uint8_t *)src;
   for (size_t i = 0; i < n; i++) 
     d[i] = s[i];
-  return dst
+  return dst;
 }
 
 // this copies n bytes and is safe when the regions overlap
@@ -39,4 +39,5 @@ int memcmp(const void *a, const void *b, size_t n) {
     if (pa[i] != pb[i])
       return (int)pa[i] - (int)pb[i];
   }
+  return 0;
 }
