@@ -18,7 +18,11 @@ module ethernet (
   input wire  [3:0] mii_rxd,
   input wire        mii_rx_dv,
   output reg        mii_tx_en,
-  output reg [3:0]  mii_txd
+  output reg [3:0]  mii_txd,
+
+  // PHY management side (MDIO config channel)
+  output reg        mdc,  // mdio clock we generate
+  inout  wire       mdio  // bidirectional data line
 );
 
   // addresses the CPU uses to reach each register
@@ -64,7 +68,7 @@ module ethernet (
     end
   end
   // Read path, when CPU reads we hand back the right value
-  always @(*) begin
+  always_comb begin
       data_out = 32'h0;
       if (rd_en) begin
           case(addr)
@@ -224,8 +228,68 @@ always @(posedge clk or posedge reset) begin
           end 
         end 
       end 
-        default: rx_State <= RX_IDLE;
+        default: rx_state <= RX_IDLE;
     endcase
   end
 end
+
+// MDIO management 
+
+localparam MDIO_CTRL_ADDR = 32'h0010;
+localparam MDIO_DATA_ADDR = 32'h0014;
+
+reg mdio_go;
+reg [31:0] mdio_frame;
+reg [15:0] mdio_read_data; // value shifted back from the PHY 
+reg        mdio_busy; // doing a transfer! 
+reg [5:0]  mdio_bit; // which of what 32 bits we are on
+reg        mdio_out; // what we drive onto the MDIO interfac e
+reg        mdio_drive; // 1 = we drive the line, 0 we listen
+reg [8:0]  mdc_div; // slows MDC down (MDIO is 2.5 Mhz)
+
+assign mdio = mdio_drive ? mdio_out : 1'bz;
+
+always @(posedge clk or posedge reset) begin 
+  if (reset) begin 
+    mdc <= 0; 
+    mdio_busy <= 0;
+    mdio_bit <= 0; 
+    mdio_drive <= 0;
+    mdc_div <= 0;
+  end else if (!mdio_busy) begin 
+    if (mdio_go) begin 
+        mdio_busy <= 1;
+        mdio_bit <= 0;
+        mdio_drive <= 1;
+        mdc_div <= 0;
+    end 
+  end else begin
+    // slow the clock way down: only step on divider rollover
+    if (mdc_div == 9'd499) begin
+      mdc_div <= 0;
+      mdc     <= ~mdc; // toggle the mdio clock
+      if (!mdc) begin
+        // about to rise: present the next bit (msb first)
+        mdio_out <= mdio_frame[31];
+      end else begin
+        // just rose: phy has sampled, now advance
+        mdio_frame <= {mdio_frame[30:0], 1'b0}; // shift left
+        // back half of the frame is the phy's reply, listen to it
+        if (mdio_bit >= 6'd18) begin
+          mdio_drive     <= 0; // release the line
+          mdio_read_data <= {mdio_read_data[14:0], mdio};
+        end
+        if (mdio_bit == 6'd31) begin
+          mdio_busy  <= 0; // all 32 bits done
+          mdio_drive <= 0;
+        end else begin
+          mdio_bit <= mdio_bit + 1;
+        end
+      end
+    end else begin
+      mdc_div <= mdc_div + 1;
+    end
+  end
+end
+
 endmodule
