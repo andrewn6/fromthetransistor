@@ -343,13 +343,15 @@ class Parser:
             if sep != Tok(TP, ","):
                 raise SyntaxError(f"parse: bad parameter, got {self.preview()}")
 
-    # ----- statements (TODO) -----
+    # ----- statements -----
 
     def is_type_start(self) -> bool:
+        # true when the cursor sits on a type keyword starting a declaration
         t = self.peek()
         return t == Tok(TKW, "int") or t == Tok(TKW, "char") or t == Tok(TKW, "void")
 
     def parse_block(self) -> Stmt:
+        # '{' stmt* '}' into SBlock
         self.expect(TP, "{")
         stmts = []
         while self.peek() != Tok(TP, "}"):
@@ -360,6 +362,7 @@ class Parser:
         return SBlock(stmts)
 
     def parse_stmt(self) -> Stmt:
+        # dispatch on the leading token to the matching statement form
         t = self.peek()
         if t == Tok(TP, "{"):
             return self.parse_block()
@@ -371,24 +374,35 @@ class Parser:
             return self.parse_return()
         if self.is_type_start():
             return self.parse_decl()
+        # fallthrough: expression statement, 'expr ;'
         e = self.parse_expr()
         self.expect(TP, ";")
         return SExpr(e)
-    
-    def parse_while(self) -> Stmt:
-        self.expect(TKW, "while")
+
+    def parse_if(self) -> Stmt:
+        # 'if' '(' cond ')' then ['else' els]
+        self.expect(TKW, "if")
         self.expect(TP, "(")
         cond = self.parse_expr()
         self.expect(TP, ")")
         then = self.parse_stmt()
-        els = None 
+        els = None
         if self.peek() == Tok(TKW, "else"):
             self.pos += 1
             els = self.parse_stmt()
         return SIf(cond, then, els)
-    
+
+    def parse_while(self) -> Stmt:
+        # 'while' '(' cond ')' body
+        self.expect(TKW, "while")
+        self.expect(TP, "(")
+        cond = self.parse_expr()
+        self.expect(TP, ")")
+        body = self.parse_stmt()
+        return SWhile(cond, body)
+
     def parse_return(self) -> Stmt:
-        # return [expr] ;
+        # 'return' [expr] ';'
         self.expect(TKW, "return")
         if self.peek() == Tok(TP, ";"):
             self.pos += 1
@@ -398,32 +412,40 @@ class Parser:
         return SReturn(e)
 
     def parse_decl(self) -> Stmt:
-        # local declaration i.e type name '=' init ';'
+        # local declaration: type name ['=' init] ';'
         ty = self.parse_type()
         name_tok = self.peek()
         if name_tok is None or name_tok.kind != TID:
             raise SyntaxError(f"parse: expected declarator, got {self.preview()}")
-        name = name_tok.val 
-        self.pos += 1 
-        init = None 
+        name = name_tok.val
+        self.pos += 1
+        init = None
         if self.peek() == Tok(TO, "="):
-            self.pos +=  1
+            self.pos += 1
             init = self.parse_expr()
         self.expect(TP, ";")
         return SDecl(ty, name, init)
+
+    # ----- expressions -----
+    # a ladder of parse functions, lowest precedence first. each level parses
+    # the next-tighter level then folds its own operators left-to-right (except
+    # assignment, which is right associative).
 
     def parse_expr(self) -> Expr:
         return self.parse_assign()
 
     def parse_assign(self) -> Expr:
+        # right associative: lhs '=' rhs
         lhs = self.parse_logic_or()
         if self.peek() == Tok(TO, "="):
             self.pos += 1
             rhs = self.parse_assign()
             return Assign(lhs, rhs)
-        return lhs 
+        return lhs
 
     def parse_binop(self, ops: dict, lower) -> Expr:
+        # generic left-associative fold: ops maps token value -> op constant,
+        # lower is the next-tighter precedence parser.
         lhs = lower()
         while True:
             t = self.peek()
@@ -432,7 +454,7 @@ class Parser:
                 rhs = lower()
                 lhs = BinOp(ops[t.val], lhs, rhs)
             else:
-                return lhs 
+                return lhs
 
     def parse_logic_or(self) -> Expr:
         return self.parse_binop({"||": OR}, self.parse_logic_and)
@@ -447,15 +469,19 @@ class Parser:
         return self.parse_binop({"<": LT, "<=": LE, ">": GT, ">=": GE}, self.parse_additive)
 
     def parse_additive(self) -> Expr:
-        return self.parse_binop({"*": MUL, "/": DIV, "%": MOD}, self.pars_unary)
+        return self.parse_binop({"+": ADD, "-": SUB}, self.parse_term)
+
+    def parse_term(self) -> Expr:
+        return self.parse_binop({"*": MUL, "/": DIV, "%": MOD}, self.parse_unary)
 
     def parse_unary(self) -> Expr:
+        # prefix operators: '-' negate, '!' logical not, '*' deref, '&' addr-of
         t = self.peek()
         if t == Tok(TO, "-"):
             self.pos += 1
             return UnOp(NEG, self.parse_unary())
         if t == Tok(TO, "!"):
-            self.pos += 1 
+            self.pos += 1
             return UnOp(NOT, self.parse_unary())
         if t == Tok(TO, "*"):
             self.pos += 1
@@ -466,42 +492,46 @@ class Parser:
         return self.parse_postfix()
 
     def parse_postfix(self) -> Expr:
+        # primary followed by zero or more call '(' args ')' or index '[' i ']'
         e = self.parse_primary()
         while True:
             t = self.peek()
             if t == Tok(TP, "("):
+                # a call only makes sense directly on a named function
                 if not isinstance(e, Var):
-                    raise SyntaxError(f"parse: cal target must be a name, got {e}")
+                    raise SyntaxError(f"parse: call target must be a name, got {e}")
                 self.pos += 1
                 args = self.parse_args()
-                e = Call(e.name, args) 
+                e = Call(e.name, args)
             elif t == Tok(TP, "["):
-                self.pos += 1 
+                self.pos += 1
                 idx = self.parse_expr()
                 self.expect(TP, "]")
                 e = Index(e, idx)
             else:
-                return e 
+                return e
 
     def parse_args(self) -> list:
+        # comma separated argument expressions up to ')'
         if self.peek() == Tok(TP, ")"):
-            self.pos += 1 
+            self.pos += 1
             return []
         args = []
         while True:
             args.append(self.parse_expr())
             sep = self.next()
             if sep == Tok(TP, ")"):
-                return args 
+                return args
             if sep != Tok(TP, ","):
                 raise SyntaxError(f"parse: bad argument list, got {self.preview()}")
 
     def parse_primary(self) -> Expr:
+        # atoms: literals, a bare name, or a parenthesized expression
         t = self.peek()
         if t is None:
             raise SyntaxError("parse: unexpected end of input in expression")
         if t.kind == TINTL:
-            self.pos += 1 
+            self.pos += 1
             return IntLit(t.val)
         if t.kind == TCHRL:
             self.pos += 1
@@ -509,37 +539,263 @@ class Parser:
         if t.kind == TSTRL:
             self.pos += 1
             return StrLit(t.val)
+        if t.kind == TID:
+            self.pos += 1
+            return Var(t.val)
         if t == Tok(TP, "("):
             self.pos += 1
             e = self.parse_expr()
             self.expect(TP, ")")
-            return e 
+            return e
         raise SyntaxError(f"parse: expected expression, got {self.preview()}")
 
-# ---------- codegen (TODO) ----------
-# target: arm assembly text that your assembler.py can consume.
+# Target is 32bit ARM, int, char and every pointer all occupy one 
+WORD = 4 
+
+def type_size(t: Type) -> int:
+    if isinstance(t, TChar):
+        return 1 
+    if isinstance(t, (TInt, TPtr)):
+        return WORD 
+    if isinstance(t, TVoid):
+        raise TypeError("codegen: void has no size")
+    raise TypeError(f"codegen: unknown type {t}")
+
+def scale_of(t: Type) -> int:
+    # pointer arithmetic step: *(p + i) advances by the size of *p.
+    # p + i ==  p + i * scale_of(typeof(p)). for a non-pointer we scale by 1 
+    if isinstance(t, TPtr):
+        return type_size(t.inner)
+    return 1 
+
+class Frame:
+    def __init__(self):
+        self.slots = {}
+        self.types = {}
+        self.size = 0 
+
+    def declare(self, name: str, t: Type) -> int:
+        if name not in self.slots:
+            self.size += WORD 
+            self.slots[name] = -self.size 
+            self.types[name] = t 
+        return self.slots[name]
+
+    def offset(self, name: str) -> int:
+        if name not in self.slots:
+            raise KeyError(f"codegen: undeclared local {name!r}")
+        return self.slots[name]
+
+    def type_of(self, name: str) -> Type:
+        return self.types[name]
+
+    def has(self, name: str) -> bool:
+        return name in self.slots 
+
+    def frame_bytes(self) -> int:
+        # total locals size, rounded to 8 byte so the stack 
+        # pointer stays 8 byte aligned per the ARM aapcs
+        return (self.size + 7) & ~7
+
+def collect_locals(frame: Frame, stmt: Stmt):
+    if isinstance(stmt, SDecl):
+        frame.declare(stmt.name, stmt.type)
+    elif isinstance(stmt, SBlock):
+        for s in stmt.stmts:
+            collect_locals(frame, s)
+    elif isinstance(stmt, SIf):
+        collect_locals(frame, stmt.then)
+        if stmt.els is not None:
+            collect_locals(frame, stmt.els)
+    elif isinstance(stmt, SWhile):
+        collect_locals(frame, stmt.body)
+
+def collect_strings(decls: list) -> dict:
+    out = {}
+    counter = [0]
+
+    def visit_expr(e):
+        if e is None:
+            return
+        if isinstance(e, StrLit):
+            if e.val not in out:
+                out[e.val] = f".Lstr{counter[0]}"
+                counter[0] += 1
+        elif isinstance(e, Assign):
+            visit_expr(e.target); visit_expr(e.value)
+        elif isinstance(e, BinOp):
+            visit_expr(e.lhs); visit_expr(e.rhs)
+        elif isinstance(e, UnOp):
+            visit_expr(e.operand)
+        elif isinstance(e, Call):
+            for a in e.args:
+                visit_expr(a)
+        elif isinstance(e, Index):
+            visit_expr(e.base); visit_expr(e.idx)
+        elif isinstance(e, (Deref, AddrOf)):
+            visit_expr(e.operand)
+
+    def visit_stmt(s):
+        if isinstance(s, SExpr):
+            visit_expr(s.expr)
+        elif isinstance(s, SBlock):
+            for x in s.stmts:
+                visit_stmt(x)
+        elif isinstance(s, SIf):
+            visit_expr(s.cond); visit_stmt(s.then)
+            if s.els is not None:
+                visit_stmt(s.els)
+        elif isinstance(s, SWhile):
+            visit_expr(s.cond); visit_stmt(s.body)
+        elif isinstance(s, SReturn):
+            visit_expr(s.expr)
+        elif isinstance(s, SDecl):
+            visit_expr(s.init)
+
+    for d in decls:
+        if isinstance(d, Func):
+            visit_stmt(d.body)
+        elif isinstance(d, Global):
+            visit_expr(d.init)
+    return out
+
+def c_string_literal(s: str) -> str:
+    # render a python string as a .asciz operand, wrap in quotes and
+    # escape the characters that matter
+    out = ['"']
+    for ch in s:
+        if ch == '\\':
+            out.append('\\\\')
+        elif ch == '"':
+            out.append('\\"')
+        elif ch == '\n':
+            out.append('\\n')
+        elif ch == '\t':
+            out.append('\\t')
+        elif ch == '\0':
+            out.append('\\000')
+        elif 32 <= ord(ch) < 127:
+            out.append(ch)
+        else:
+            out.append(f'\\{ord(ch):03o}')
+    out.append('"')
+    return "".join(out)
+# ---------- codegen ----------
+# target: gnu-style arm assembly text (gas syntax). a later pass / our own
+# extended assembler consumes this. model: each expression computes into r0;
+# temporaries are pushed/popped. aapcs calling convention (args r0-r3 then
+# stack, return in r0, fp=r11, lr=r14, sp=r13).
 
 class CodeGen:
     def __init__(self):
         self.lines = []          # output assembly lines
         self.strings = {}        # string literal -> label, for .data
+        self.globals = []        # list of Global nodes, emitted into .data/.bss
         self.label_count = 0
+        self.frame = None        # current function's Frame (set in gen_func)
+        self.epilogue = None     # current function's epilogue label (for return)
+
+    # ----- emit helpers -----
+
+    def emit(self, line: str = ""):
+        # append one line of assembly. blank line for spacing when empty.
+        self.lines.append(line)
+
+    def label(self, name: str):
+        # emit a label definition 'name:' at column 0
+        self.lines.append(f"{name}:")
 
     def new_label(self, prefix="L") -> str:
+        # unique local label, e.g. '.L3'. used for branch targets.
         self.label_count += 1
         return f".{prefix}{self.label_count}"
 
+    # ----- program -----
+
     def gen_program(self, decls: list) -> str:
-        # TODO: emit globals into .data/.bss, then each function
-        raise NotImplementedError("gen_program not implemented yet")
+        # split top-level decls, gather strings, then emit .data then .text.
+        self.strings = collect_strings(decls)
+        funcs = [d for d in decls if isinstance(d, Func)]
+        self.globals = [d for d in decls if isinstance(d, Global)]
+
+        # .data section: globals with initializers + all string literals
+        self.emit(".data")
+        for g in self.globals:
+            self.emit(f".global {g.name}")
+            self.label(g.name)
+            if g.init is None:
+                # uninitialized global: reserve its size, zeroed
+                self.emit(f"    .zero {type_size(g.type)}")
+            elif isinstance(g.init, IntLit):
+                self.emit(f"    .word {g.init.val}")
+            elif isinstance(g.init, CharLit):
+                self.emit(f"    .byte {ord(g.init.val)}")
+            elif isinstance(g.init, StrLit):
+                # a global char* initialized to a string literal points at
+                # the literal's label; the bytes are emitted below.
+                self.emit(f"    .word {self.strings[g.init.val]}")
+            else:
+                raise NotImplementedError(
+                    f"codegen: global initializer must be a constant, got {g.init}")
+
+        # emit each unique string literal once, as a label + nul-terminated bytes
+        for value, lbl in self.strings.items():
+            self.label(lbl)
+            self.emit(f"    .asciz {c_string_literal(value)}")
+
+        # .text section: the functions
+        self.emit()
+        self.emit(".text")
+        for fn in funcs:
+            self.gen_func(fn)
+            self.emit()
+
+        return "\n".join(self.lines) + "\n"
+
+    # ----- functions -----
 
     def gen_func(self, fn: Func):
-        # TODO:
-        #   - emit label + prologue (push lr/fp, set up frame)
-        #   - assign each local/param a stack slot (simple frame layout)
-        #   - gen_stmt(fn.body)
-        #   - emit epilogue (restore, bx lr)
-        raise NotImplementedError("gen_func not implemented yet")
+        # build the frame: params first (so their slots are deterministic),
+        # then every local declared anywhere in the body.
+        self.frame = Frame()
+        for (ty, name) in fn.params:
+            self.frame.declare(name, ty)
+        collect_locals(self.frame, fn.body)
+        frame_bytes = self.frame.frame_bytes()
+
+        # a per-function epilogue label so 'return' anywhere can jump to the
+        # single restore-and-exit sequence.
+        self.epilogue = self.new_label("Lret")
+
+        self.emit(f".global {fn.name}")
+        self.label(fn.name)
+
+        # prologue: save fp/lr, set fp to the new frame base, reserve locals.
+        self.emit("    push {fp, lr}")
+        self.emit("    mov fp, sp")
+        if frame_bytes:
+            self.emit(f"    sub sp, sp, #{frame_bytes}")
+
+        # spill incoming register args (r0-r3) into their stack slots so the
+        # rest of codegen can treat params like any other local. args beyond
+        # the fourth were passed on the stack by the caller (handled later).
+        for i, (ty, name) in enumerate(fn.params):
+            if i < 4:
+                off = self.frame.offset(name)
+                self.emit(f"    str r{i}, [fp, #{off}]")
+            else:
+                raise NotImplementedError(
+                    "codegen: more than 4 params (stack args) not yet supported")
+
+        # body
+        self.gen_stmt(fn.body)
+
+        # epilogue: restore sp/fp/lr and return. a function that falls off the
+        # end returns garbage in r0, matching c's undefined behavior.
+        self.label(self.epilogue)
+        self.emit("    mov sp, fp")
+        self.emit("    pop {fp, lr}")
+        self.emit("    bx lr")
 
     def gen_stmt(self, s: Stmt):
         # TODO: one case per Stmt subclass. loops/ifs emit branches + labels.
