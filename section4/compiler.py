@@ -798,7 +798,10 @@ class CodeGen:
         self.emit("    bx lr")
 
     def gen_stmt(self, s: Stmt):
-        if ininstance(s, SExpr):
+        # one case per Stmt subclass. control flow lowers to cmp + cond
+        # branches + fresh labels; every other case recurses or stores.
+        if isinstance(s, SExpr):
+            # evaluate for side effects, discard the result in r0
             self.gen_expr(s.expr)
 
         elif isinstance(s, SBlock):
@@ -807,41 +810,63 @@ class CodeGen:
 
         elif isinstance(s, SReturn):
             if s.expr is not None:
-                self.gen_expr(s.expr)
+                self.gen_expr(s.expr)          # result in r0
             else:
-                self.emit("  mov r0, #0")
+                self.emit("    mov r0, #0")    # bare 'return' returns 0
             self.emit(f"    b {self.epilogue}")
 
         elif isinstance(s, SDecl):
-            # locals pre-allocated by collect_locals, store the 
-            # initializer if one exists 
-            # same as real C!
+            # locals were pre-allocated by collect_locals; just store the
+            # initializer if there is one. uninitialized locals hold garbage,
+            # same as real c.
             if s.init is not None:
-                self.gen_expr(s.init)
+                self.gen_expr(s.init)          # value in r0
                 off = self.frame.offset(s.name)
                 if isinstance(s.type, TChar):
                     self.emit(f"    strb r0, [fp, #{off}]")
                 else:
-                    self.emit(f"       str r0. [fp, #{off}]")
+                    self.emit(f"    str r0, [fp, #{off}]")
 
         elif isinstance(s, SIf):
-            # cond -> branch on false 
-            self.gen_expr(s.cond) 
+            # cond -> branch on false over 'then', optional jump over 'else'
+            self.gen_expr(s.cond)              # value in r0
             else_l = self.new_label("Lelse")
             end_l = self.new_label("Lend")
-            self.emit(".   cmp r0 #0")
-            self.emit(f".  beq{else_l}")
+            self.emit("    cmp r0, #0")
+            self.emit(f"    beq {else_l}")
+            self.gen_stmt(s.then)
+            if s.els is not None:
+                self.emit(f"    b {end_l}")
+                self.label(else_l)
+                self.gen_stmt(s.els)
+                self.label(end_l)
+            else:
+                # no else: 'then' falls through to here when cond was true
+                self.label(else_l)
+
+        elif isinstance(s, SWhile):
+            # top-of-loop label, re-test cond each iteration
+            top_l = self.new_label("Lwhile")
+            end_l = self.new_label("Lwend")
+            self.label(top_l)
+            self.gen_expr(s.cond)              # value in r0
+            self.emit("    cmp r0, #0")
+            self.emit(f"    beq {end_l}")
             self.gen_stmt(s.body)
-            self.emit(f".   b {top_l}")
+            self.emit(f"    b {top_l}")
             self.label(end_l)
 
         else:
             raise NotImplementedError(f"gen_stmt: unknown stmt {s}")
 
-    def infer_type(self, e:Expr) -> Type:
-        if isinstance(e, Intlit):
+    # ----- type inference -----
+    # minimal local inference: just enough to pick ldr vs ldrb/str vs strb
+    # and to scale pointer arithmetic. undeclared names (callees) assume int.
+
+    def infer_type(self, e: Expr) -> Type:
+        if isinstance(e, IntLit):
             return TInt()
-        if isinstance(e, CharLit): 
+        if isinstance(e, CharLit):
             return TChar()
         if isinstance(e, StrLit):
             return TPtr(TChar())
@@ -850,112 +875,142 @@ class CodeGen:
                 return self.frame.type_of(e.name)
             for g in self.globals:
                 if g.name == e.name:
-                    return g.type 
+                    return g.type
+            return TInt()
         if isinstance(e, Deref):
             t = self.infer_type(e.operand)
             return t.inner if isinstance(t, TPtr) else TInt()
+        if isinstance(e, Index):
+            t = self.infer_type(e.base)
+            return t.inner if isinstance(t, TPtr) else TInt()
         if isinstance(e, Assign):
             return self.infer_type(e.target)
+        if isinstance(e, AddrOf):
+            return TPtr(self.infer_type(e.operand))
         if isinstance(e, UnOp):
-            return TInt()
+            return TInt()          # !x and -x are ints
         if isinstance(e, Call):
-            return TInt()
+            return TInt()          # we do not track return types
         if isinstance(e, BinOp):
+            # pointer +/- int keeps the pointer type (for p+1 deref chains)
             if e.op in (ADD, SUB):
                 lt = self.infer_type(e.lhs)
                 if isinstance(lt, TPtr):
-                    return lt 
+                    return lt
                 rt = self.infer_type(e.rhs)
                 if isinstance(rt, TPtr):
                     return rt
-
             return TInt()
-
         raise NotImplementedError(f"infer_type: unknown expr {e}")
 
+    # ----- load/store picking -----
+
     def load_insn(self, t: Type) -> str:
+        # word or byte load for reading a value of type t
         return "ldrb" if isinstance(t, TChar) else "ldr"
 
     def store_insn(self, t: Type) -> str:
         return "strb" if isinstance(t, TChar) else "str"
 
+    # ----- lvalues -----
+    # gen_lvalue evaluates the ADDRESS of an assignable expression into r0.
+
     def gen_lvalue(self, e: Expr):
         if isinstance(e, Var):
             if self.frame is not None and self.frame.has(e.name):
+                # local: address = fp + slot offset
                 off = self.frame.offset(e.name)
-                self.emit(f".   add r0, fp #{off}")
+                self.emit(f"    add r0, fp, #{off}")
             else:
-                self.emit(f".   ldr r0, ={e.name}")
-
+                # global: address = its linker-resolved symbol
+                self.emit(f"    ldr r0, ={e.name}")
         elif isinstance(e, Deref):
             # *p as lvalue: p already IS the address
             self.gen_expr(e.operand)
         elif isinstance(e, Index):
+            # a[i] as lvalue: address = base + i * scale
             self.gen_lvalue_index(e)
         else:
-            raise NotImplementedError(f"gen_lvalue: not assignable: {e}x")
+            raise NotImplementedError(f"gen_lvalue: not assignable: {e}")
 
     def gen_lvalue_index(self, e: Index):
+        # shared by Index-as-lvalue and Index-as-rvalue-load
         t = self.infer_type(e.base)
-        scale = scale_of(t) if isinstance(t, TPtr) else 1 
-        self.gen_expr(e.base)
-        self.emit(".  push {r0}")
-        self.gen_expr(e.idx)
+        scale = scale_of(t) if isinstance(t, TPtr) else 1
+        self.gen_expr(e.base)          # base address in r0
+        self.emit("    push {r0}")
+        self.gen_expr(e.idx)           # index in r0
         if scale != 1:
-            self.emit(f".   mov r1, #{scale}")
-            self.emit("      mul r0, r0, r1")
-        self.emit(".   pop {r1}")
-        self.emit(".   add r0, r1, r0")
+            self.emit(f"    mov r1, #{scale}")
+            self.emit("    mul r0, r0, r1")
+        self.emit("    pop {r1}")      # r1 = base, r0 = scaled index
+        self.emit("    add r0, r1, r0")
+
+    # ----- expressions -----
+    # gen_expr evaluates the VALUE of e into r0. temporaries go through the
+    # stack (push/pop), so evaluation may freely clobber r0 between operands.
 
     def gen_expr(self, e: Expr):
         if isinstance(e, IntLit):
-            if 0 <= e.val <= 2555:
-                self.emit(f".   mov r0, #{e.val}")
+            # mov immediate only encodes 0-255 (and some rotated forms);
+            # anything else goes through a literal via ldr =
+            if 0 <= e.val <= 255:
+                self.emit(f"    mov r0, #{e.val}")
             else:
-                self.emit(f".     ldr r0, ={e.val}")
+                self.emit(f"    ldr r0, ={e.val}")
 
         elif isinstance(e, CharLit):
-            self.emit(f".  mov r, #{ord(e.val)}")
+            self.emit(f"    mov r0, #{ord(e.val)}")
 
         elif isinstance(e, StrLit):
             # value of a string literal is its address
-            self.emit(f" ldr r0, ={self.strings[e.val]}")
+            self.emit(f"    ldr r0, ={self.strings[e.val]}")
 
         elif isinstance(e, Var):
             if self.frame is not None and self.frame.has(e.name):
                 off = self.frame.offset(e.name)
                 insn = self.load_insn(self.frame.type_of(e.name))
-                self.emit(f".  {insn} r0, [fp #{off}]")
+                self.emit(f"    {insn} r0, [fp, #{off}]")
             else:
-                self.emit(f".   ldr r0 = {e.name}")
+                # global: load directly off its symbol
+                self.emit(f"    ldr r0, ={e.name}")
                 t = self.infer_type(e)
                 insn = self.load_insn(t)
-                self.emit(f".   {insn} r0, [r0]")
+                self.emit(f"    {insn} r0, [r0]")
 
         elif isinstance(e, Assign):
+            # address of target, value of rhs, store. value stays in r0
+            # so 'x = y = 5' chains work.
             t = self.infer_type(e.target)
-            self.gen_lvalue(e.target)
-            self.emit(".   push {r0}")
-            self.gen_expr(e.value)
-            self.emit(".  pop {r1}")
-            self.emit(f".   {self.store_insn(t)} r0, [r1]")
+            self.gen_lvalue(e.target)      # address in r0
+            self.emit("    push {r0}")
+            self.gen_expr(e.value)         # value in r0
+            self.emit("    pop {r1}")      # r1 = address, r0 = value
+            self.emit(f"    {self.store_insn(t)} r0, [r1]")
 
         elif isinstance(e, AddrOf):
             self.gen_lvalue(e.operand)
 
         elif isinstance(e, Deref):
-            t = self.infer_type(e) # char vs word
-            self.gen_expr(e.operand)
-            self.emit(f".   {self.load_insn(t)} r0, [r0]")
+            t = self.infer_type(e)         # element type (char vs word)
+            self.gen_expr(e.operand)       # address in r0
+            self.emit(f"    {self.load_insn(t)} r0, [r0]")
+
+        elif isinstance(e, Index):
+            t = self.infer_type(e)
+            self.gen_lvalue_index(e)       # address in r0
+            self.emit(f"    {self.load_insn(t)} r0, [r0]")
 
         elif isinstance(e, UnOp):
             self.gen_expr(e.operand)
             if e.op == NEG:
-                self.emit(".  rsb r0, r0, #0")
+                # rsb = reverse subtract: r0 = 0 - r0
+                self.emit("    rsb r0, r0, #0")
             elif e.op == NOT:
-                self.emit(".  cmp r0, #0")
-                self.emit(".   mov r0, #0")
-                self.emit(".  moveq r0, #1")
+                # !x -> r0 = (x == 0)
+                self.emit("    cmp r0, #0")
+                self.emit("    mov r0, #0")
+                self.emit("    moveq r0, #1")
             else:
                 raise NotImplementedError(f"gen_expr: unknown unop {e.op}")
 
@@ -969,23 +1024,24 @@ class CodeGen:
             raise NotImplementedError(f"gen_expr: unknown expr {e}")
 
     def gen_binop(self, e: BinOp):
-        op = e.op 
+        op = e.op
 
+        # short-circuit logical operators lower to branches, not alu ops
         if op == AND:
             false_l = self.new_label("Landf")
             end_l = self.new_label("Land")
             self.gen_expr(e.lhs)
-            self.emit("   cmp r0, #0")
-            self.emit(f".  beq {false_l}")
+            self.emit("    cmp r0, #0")
+            self.emit(f"    beq {false_l}")
             self.gen_expr(e.rhs)
-            self.emit(".   cmp r0, #0")
-            self.emit(f".   beq {false_l}")
-            self.emit("   mov r0, #1")
-            self.emit(f". b {end_l}")
+            self.emit("    cmp r0, #0")
+            self.emit(f"    beq {false_l}")
+            self.emit("    mov r0, #1")
+            self.emit(f"    b {end_l}")
             self.label(false_l)
-            self.emit(" move r0, #0")
+            self.emit("    mov r0, #0")
             self.label(end_l)
-            return 
+            return
         if op == OR:
             true_l = self.new_label("Lort")
             end_l = self.new_label("Lor")
@@ -1002,53 +1058,57 @@ class CodeGen:
             self.label(end_l)
             return
 
+        # pointer arithmetic: if one side is a pointer, scale the other side
         scale = 1
         lt = self.infer_type(e.lhs)
         if isinstance(lt, TPtr) and op in (ADD, SUB):
             scale = scale_of(lt)
 
+        # lhs -> r0, push; rhs -> r0; pop lhs into r1
         self.gen_expr(e.lhs)
-        self.emit(".  push {r0}")
+        self.emit("    push {r0}")
         self.gen_expr(e.rhs)
         if scale != 1:
-            self.emit(f".  mov r1, #{scale}")
-            self.emit(f".   mul r0, r0, r1")
-        self.emit(".  pop {r1}")
+            self.emit(f"    mov r1, #{scale}")
+            self.emit("    mul r0, r0, r1")
+        self.emit("    pop {r1}")          # r1 = lhs, r0 = rhs
 
         if op == ADD:
-            self.emit(".  add r0, r1, r0")
+            self.emit("    add r0, r1, r0")
         elif op == SUB:
-            self.emit(".  sub r0, r1, r0")
+            self.emit("    sub r0, r1, r0")
         elif op == MUL:
-            self.emit(".  mul r0, r1, r0")
+            self.emit("    mul r0, r1, r0")
         elif op in (DIV, MOD):
-            # no divide in ARM subset, runtime helper called 
-            self.emit(". mov r2, r0") # save rhs 
-            self.emit(".  move r0, r1")
-            self.emit(".  mov r1, r2")
-            self.emit(f".  bl {'__divsi3' if op == DIV else '__modsi3'}")
+            # no divide in our arm subset: call a runtime helper
+            # __divsi3(r0 = numerator, r1 = denominator) -> r0
+            self.emit("    mov r2, r0")    # save rhs
+            self.emit("    mov r0, r1")    # r0 = lhs
+            self.emit("    mov r1, r2")    # r1 = rhs
+            self.emit(f"    bl {'__divsi3' if op == DIV else '__modsi3'}")
         elif op in (EQ, NE, LT, LE, GT, GE):
+            # cmp sets flags from lhs - rhs, then materialize 0/1 with
+            # conditional movs. r1 = lhs, r0 = rhs.
             cond = {EQ: "eq", NE: "ne", LT: "lt",
                     LE: "le", GT: "gt", GE: "ge"}[op]
-            self.emit(".  cmp r1, r0")
-            self.emit(".  mov r0, #0")
-            self.emit(f".  mov{cond} r0, #1")
+            self.emit("    cmp r1, r0")
+            self.emit("    mov r0, #0")
+            self.emit(f"    mov{cond} r0, #1")
         else:
-            raise NotImplementedError(f"gen_binop: unknown operator {op}")
-
+            raise NotImplementedError(f"gen_binop: unknown op {op}")
 
     def gen_call(self, e: Call):
-        if len (e.args) > 4:
+        if len(e.args) > 4:
             raise NotImplementedError(
-                "codegen: more than 4 call args (stack args) not yet supported"
-            )
-
+                "codegen: more than 4 call args (stack args) not yet supported")
+        # evaluate args left to right, each pushed; then pop in reverse so
+        # arg i lands in register r_i.
         for a in e.args:
             self.gen_expr(a)
-            self.emit(". push {r0}")
+            self.emit("    push {r0}")
         for i in range(len(e.args) - 1, -1, -1):
-            self.emit(f".  pop {{r{i}}}")
-        self.emit(f".  bl {e.names}")
+            self.emit(f"    pop {{r{i}}}")
+        self.emit(f"    bl {e.name}")
 
 def compile_text(src: str) -> str:
     toks = tokenize(src)
