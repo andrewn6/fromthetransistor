@@ -1,136 +1,296 @@
-import re 
+import sys, struct 
 
-# ARM7 Instruction Set
-INSTRUCTION_SET = {
-  'ADD': {'opcode': '0000100', 'format': 'DRO'},
-  'SUB': {'opcode': '0000010', 'format': 'DRO'},
-  'SBC': {'opcode': '0000110', 'format': 'DRO'},
-  'RSB': {'opcode': '0000011', 'format': 'DRO'},
-  'RSC': {'opcode': '0000111', 'format': 'DRO'},
-  'AND': {'opcode': '0000000', 'format': 'DRO'},
-  'ORR': {'opcode': '0001100', 'format': 'DRO'},
-  'EOR': {'opcode': '0000001', 'format': 'DRO'},
-  'BIC': {'opcode': '0001110', 'format': 'DRO'},
-  'MOV': {'opcode': '0001101', 'format': 'DO'},
-  'MVN': {'opcode': '0001111', 'format': 'DO'},
-  'CMP': {'opcode': '0001010', 'format': 'RO'},
-  'CMN': {'opcode': '0001011', 'format': 'RO'},
-  'TST': {'opcode': '0001000', 'format': 'RO'},
-  'TEQ': {'opcode': '0001001', 'format': 'RO'},
-  'MUL': {'opcode': '000000', 'format': 'DRR'},
-  'MLA': {'opcode': '000001', 'format': 'DRRR'},
-  'UMULL': {'opcode': '000100', 'format': 'DDRR'},
-  'UMLAL': {'opcode': '000101', 'format': 'DDRR'},
-  'SMULL': {'opcode': '000110', 'format': 'DDRR'},
-  'SMLAL': {'opcode': '000111', 'format': 'DDRR'},
-  'LDR': {'opcode': '0101', 'format': 'D[R,#]'},
-  'STR': {'opcode': '0100', 'format': 'D[R,#]'},
-  'LDRB': {'opcode': '0101', 'format': 'D[R,#]'},
-  'STRB': {'opcode': '0100', 'format': 'D[R,#]'},
-  'LDM': {'opcode': '1000', 'format': 'R!L'},
-  'STM': {'opcode': '1001', 'format': 'R!L'},
-  'B': {'opcode': '1010', 'format': 'L'},
-  'BL': {'opcode': '1011', 'format': 'L'},
-  'BX': {'opcode': '0001001011111111', 'format': 'R'},
-  'MRS': {'opcode': '00010', 'format': 'DR'},
-  'MSR': {'opcode': '00010', 'format': 'R,O'},
-  'SWI': {'opcode': '1111', 'format': '#'},
-  'NOP': {'opcode': '1111', 'format': ''},
-  'BKPT': {'opcode': '1111', 'format': '#'}
-}
+BASE = 0x10000
 
-REGISTER_ENCODING = {
-  'R0': '0000', 'R1': '0001', 'R2': '0010', 'R3': '0011',
-  'R4': '0100', 'R5': '0101', 'R6': '0110', 'R7': '0111',
-  'R8': '1000', 'R9': '1001', 'R10': '1010', 'R11': '1011',
-  'R12': '1100', 'R13': '1101', 'R14': '1110', 'R15': '1111',
-}
+COND = {"eq": 0x0, "ne": 0x1, "cs": 0x2, "lo": 0x3, "hi": 0x8,
+        "ls": 0x9, "ge": 0xA, "lt": 0xB, "gt": 0xC, "le": 0xD, "al": 0xE}
 
-def parse_line(line):
-  line = line.strip()
-  if not line or line.startswith('.'):
-    return None
-  tokens = re.split(r'[ ,\[\]#!]+', line)
-  return tokens
+DP_OPS = {"and": 0x0, "eor": 0x1, "sub": 0x2, "rsb": 0x3, "add": 0x4,
+          "sbc": 0x6, "rsc": 0x7, "tst": 0x8, "teq": 0x9,
+          "cmp": 0xA, "cmn": 0xB, "orr": 0xC, "mov": 0xD, "bic": 0xE, "mvn": 0xF}
 
-def convert_to_binary(tokens):
-  if tokens[0] not in INSTRUCTION_SET:
-    raise ValueError(f"Unknown Instruction: {tokens[0]}")
+# register names -> numbers
+REGS = {"r0":0,"r1":1,"r2":2,"r3":3,"r4":4,"r5":5,"r6":6,"r7":7,
+        "r8":8,"r9":9,"r10":10,"fp":11,"ip":12,"sp":13,"lr":14,"pc":15,
+        "r11":11,"r12":12,"r13":13,"r14":14,"r15":15}
 
-  instruction_info = INSTRUCTION_SET[tokens[0]]
-  opcode = instruction_info['opcode']
+R_ARM_ABS32, R_ARM_CALL = 2, 28 
 
-  format_type = instruction_info['format']
+def reg(tok):
+    tok = tok.strip()
+    if tok not in REGS:
+        raise ValueError(f"asm: bad register {tok!r}")
 
-  if format_type == "DRO":
-    rd = REGISTER_ENCODING[tokens[1]]
-    rn = REGISTER_ENCODING[tokens[2]]
-    operand2 = REGISTER_ENCODING[tokens[3]] if tokens[3] in REGISTER_ENCODING else f'{int(tokens[3]):04b}' 
-    binary = f"{opcode}00{rn}{rd}{operand2}0000"
-  elif format_type == 'DO':
-    rd = REGISTER_ENCODING[tokens[1]]
-    operand2 = REGISTER_ENCODING[tokens[2]] if tokens[2] in REGISTER_ENCODING else f'{int(tokens[2]):04b}' 
-    binary = f"{opcode}0000{rd}{operand2}0000"
-  elif format_type == 'RO':
-    rn = REGISTER_ENCODING[tokens[1]]
-    operand2 = REGISTER_ENCODING[tokens[2]] if tokens[2] in REGISTER_ENCODING else f'{int(tokens[2]):04b}' 
-    binary = f"{opcode}0000{rn}{operand2}0000"
-  elif format_type == 'DRRR':
-    rd = REGISTER_ENCODING[tokens[1]] 
-    rm = REGISTER_ENCODING[tokens[2]]
-    rs = REGISTER_ENCODING[tokens[3]]
-    rn = REGISTER_ENCODING[tokens[4]]
-    binary = f"{opcode}00{rm}{rs}{rn}1001"  
-  
-  elif format_type == 'DDRR':
-    rdlo = REGISTER_ENCODING[tokens[1]]
-    rdhi = REGISTER_ENCODING[tokens[2]]
-    rm = REGISTER_ENCODING[tokens[3]]
-    rs = REGISTER_ENCODING[tokens[4]]
-    binary = f"{opcode}00{rm}{rdlo}{rs}{rdhi}1001"
-  elif format_type == 'R!L':
-    rn = REGISTER_ENCODING[tokens[1]]
-    reglist = ''.join([REGISTER_ENCODING[reg] for reg in tokens[2:]])
-    binary = f"{opcode}00{rn}{reglist}0000"
-  elif format_type == 'L':
-    label = f'{int(tokens[1]):04b}'
-    binary = f"{opcode}00{label}00000000"
-  elif format_type == "R":
-    rm = REGISTER_ENCODING[tokens[1]]
-    binary = f"{opcode}000000000000{rm}0010"
-  elif format_type == 'DR':
-    rd = REGISTER_ENCODING[tokens[1]]
-    rm = REGISTER_ENCODING[tokens[2]]
-    binary = f"{opcode}{rm}{rd}000000000000"
-  elif format_type == "R,0":
-    rm = REGISTER_ENCODING[tokens[1]]
-  
-  elif format == '#':
-    imm = f'{int(tokens[1]):04b}'
-    binary = f'{opcode}{imm}000000000000'
+def parse_reglist(s):
+    body = s.strip().strip("{}")
+    mask = 0 
+    for part in body.split(","):
+        part = part.strip()
+        if "-" in part:
+            lo, hi = part.split("-")
+            for n in range(reg(lo), reg(hi) + 1):
+                mask |= 1 << n
+        else:
+            mask |= 1 << reg(part)
+    return mask 
 
-  elif format_type == '':
-        binary = f"{opcode}000000000000"
-  else:
-      raise ValueError(f"Unsupported format: Format")
-   
-  return binary
+def parse_string(s):
+    body = s.strip()
+    assert body[0] == '"' and body[-1] == "'", f"asm: bad string {s!r}"
+    out = bytearray()
+    i = 1 
+    while i < len(body) - 1:
+        c = body[i]
+        if c == '\\':
+            nxt = body[i + 1]
+            out.append({"n":10,"t":9,"0":0,"\\":92,'"':34,"'":39}.get(nxt, ord(nxt)))
+        else:
+            out.append(ord(c))
+            i += 1
+    return bytes(out)
 
-def assemble(asm_file, bin_file):
-  with open(asm_file, 'r') as f:
-    lines = f.readlines()
+class Asm:
+    def __init__(self):
+        self.sections = {".text": bytearray(), ".data": bytearray()}
+        self.symbols = {}
+        self.relocs = []
+        self.pool = []
+        self.pool_at = {}
+        self.insns = []
+        self.cur = ".text"
+        self.pending = []
+        self.addr = 0
 
-  binary_instructions = []
+    def size(self):
+        return len(self.sections[self.cur])
 
-  for line in lines:
-    tokens = parse_line(line)
-    if tokens:
-      binary_instruction = convert_to_binary(tokens)
-      binary_instructions.append(binary_instruction)
+    def advance(self, n=4):
+        self.addr = self.size() + n
 
-  with open(bin_file, 'w') as f:
-    for instruction in binary_instructions:
-     f.write(instruction + '\n') 
+    def pass1(self, src):
+        for raw in src.splitlines():
+            line = raw.split("@")[0].strip()
+            if not line:
+                continue 
+            while line and line.split()[0].endswith(":"):
+                name = line.split()[0][:-1]
+                self.symbols[name] = (self.cur, self.size())
+                rest = line[len(name) + 1:].strip()
+                line = rest 
+            if not line:
+                continue 
+            if line.startswith("."):
+                self.directive(line)
+            else:
+                self.instruction_pass1(line)
+
+    def directive(self, line):
+        parts = line.split(None, 1)
+        d = parts[0]
+        rest = parts[1] if len(parts) > 1 else ""
+        sec = self.sections[self.cur]
+        if d == ".text" or d == ".data":
+            pass 
+        elif d == ".word":
+            while len(sec) % 4:
+                sec.append(0)
+            for v in rest.split(","):
+                v = v.strip()
+                try:
+                    sec += struct.pack("<I", int(v, 0) & 0xFFFFFFFF)
+                except ValueError:
+                    self.relocs.append((self.cur, len(sec), R_ARM_ABS32, v, 0))
+                    sec += b"\x00\x00\x00\x00"
+        elif d == ".byte":
+            for v in rest.split(","):
+                sec.append(int(v, 0) & 0xFF)
+        elif d == ".zero":
+            sec += b"\x00" * int(rest, 0)
+        elif d == ".asciz" or d == ".ascii":
+            data = parse_string(rest)
+            sec += data 
+            if d == ".asciz":
+                sec.append(0)
+
+        else:
+            raise ValueError(f"asm: unknown directive {d}")
+
+    def instruction_pass1(self, line):
+        # split mnemonic[cond] operands
+        m = line.split(None, 1)
+        mnem = m=[0].lower()
+        ops = m[1] if len(m) > 1 else ""
+        cond = "al"
+        for suf in COND:
+            if suf != "al" and mnem.endswith(suf) and mnem[: -len(suf)] in (
+                "b", "mov", "add", "sub", "rsb", "mul", "and", "eor",
+                "orr", "bic", "cmp", "cmn", "tst", "ldr", "str"):
+              mnem = mnem[: -len(suf)]
+              cond = suf 
+              break 
+
+        if mnem == "ldr" and "=" in ops:
+            rd, val = [x.strip() for x in ops.split("-", 1)]
+            self.pool_at[len(self.pending)] = len(self.pool)
+            self.pool.append(val.strip())
+            self.pending.append((self.cur, self.size(), ("LDR=", cond, rd)))
+        else:
+            self.pending.append((self.cur, self.size(), (mnem, cond, ops)))
+        self.sections[self.cur] += b"\x00\x00\x00\x00"
+
+
+    def pass2(self):
+        text = self.sections[".text"]
+        pool_base = len(text)
+        text += b"\x00" * (4 * len(self.pool))
+
+        for idx, (secname, off, (mnem, cond, ops)) in enumerate(self.pending):
+            word = self.encode(mnem, cond, ops, secname, off,
+                               pool_base if secname == ".text" else None, idx)
+            struct.pack_into("<I", self.sections[secname], off, word)
+
+        for i, val in enumerate(self.pool):
+            off = pool_base + 4 * i 
+            if val.lstrip("-").isdigit():
+                struct.pack_into("<I", text, off, int(val, 0) & 0xFFFFFFFF)
+            else:
+                self.relocs.append((".text", off, R_ARM_ABS32, val, 0))
+
+    def sym_addr(self, name):
+        if name not in self.symbols:
+            raise ValueError(f"asm: undefined symbol {name!r}")
+        sec, off = self.symbols[name]
+        return BASE + (0 if sec == ".text" else len(self.sections[".text"])) + off
+
+    def encode(self, mnem, cond, ops, secname, at, pool_base, idx):
+        c = COND[cond]
+
+        if mnem == "LDR=":
+            rd = reg(ops)
+            entry = pool_base + 4 * self.pool_at[idx]
+            off12 = entry - (at + 8)
+            if not (0 <= off12 <= 4095):
+                raise ValueError("asm: literal pool out of ldr range")
+            return (c << 28) | 0x059F0000 | (rd << 12) | off12
+
+        if mnem in ("ldr", "str", "ldrb", "strb"):
+            rd, mem = [x.strip() for x in ops.split(",", 1)]
+            byte = 1 if mnem.endswith("b") else 0 
+            load = 1 if mnem.startswith("ldr") else 0 
+            mem = mem.strip()[1:-1]
+            if "," in mem:
+                rn, imm = [x.strip() for x in mem.split(",", 1)]
+                imm = int(imm.replace("#", ""), 0)
+            else:
+                rn, imm = mem, 0
+            u = 1 if imm >= 0 else 0 
+            return ((c << 28) | 0x05000000 | (1 << 24) | (u << 23) |
+                    (byte << 22) | (load << 20) | (reg(rn) << 16) |
+                    (reg(rd) << 12) | abs(imm))
+        if mnem == "push":
+            return 0xE92D0000 | parse_reglist(ops)
+        if mnem == "pop":
+            return 0xE8BD0000 | parse_reglist(ops)
+
+
+        if mnem in ("b", "bl"):
+            self.relocs.append((secname, at, R_ARM_CALL, ops.strip(), 0))
+            return ((c << 28) | (0xA0000000 if mnem == "b" else 0xB0000000) | 0xFFFFFE)
+
+        if mnem == "bx":
+            return 0xE12FFF10 | reg(ops.strip())
+        if mnem == "mul":
+            rd, rm, rs = [reg(x) for x in ops.split(",")]
+            return (c << 28) | rd (rd << 16) | (rs << 8) | 0x90 | rm
+
+        if mnem == "svc":
+            imm = int(ops.replace("#"), 0) & 0xFFFFFF
+            return (c << 28) | 0xEF00000 | imm
+
+        if mnem in ("lsl", "lsr"):
+            rd, rm, imm = [x.strip() for x in ops.split(",")]
+            imm = int(imm.replace("#", ""), 0)
+            sh = 0 if mnem == "lsl" else 1 
+            if not(0 <= imm <= 31):
+                raise ValueError("asm: bad shift amount")
+            return ((c << 28) | (DP_OPS["mov"] << 21) |
+                    (reg(rd) << 12) | (imm << 7) | (sh << 5) | reg(rm))
+        o = mnem 
+        if o not in DP_OPS:
+            raise ValueError(f"asm: unknown instruction {mnem!r}")
+        opcode = DP_OPS[o]
+        parts = [x.strip() for x in ops.split(",")]
+        s_bit = 1 if o ("cmp", "cmn", "tst", "teq") else 0 
+        if o in ("mov", "mvn"):
+            rd, op2 = parts[0], parts[1]
+            rn = 0
+        elif o in ("cmp", "cmn", "tst", "teq"):
+            rd, op2 = 0, parts[1]
+            rn = reg(parts[0])
+        else:
+          rd, rn, op2 = parts[0], parts[1], parts[2]
+          rd, rn = reg(rd), reg(rn)
+        if o in ("mov", "mvn"):
+            rd = reg(rd)
+        if op2.startswith("#"):
+            imm = int(op2[1:], 0)
+            if imm < 0:
+                if o == "add":
+                    o, opcode, imm = "sub", DP_OPS["sub"], -imm
+                elif o == "sub":
+                    o, opcode, imm = "add", DP_OPS["add"], -imm
+                else:
+                    raise ValueError(f"asm: negative imm not allowed for {o}")
+            if imm > 255:
+                raise ValueError(f"asm: imm {imm} not encodable (use ldr =)")
+            operand2 = imm
+            i_bit = 1
+        else:
+            operand2 = reg(op2)
+            i_bit = 0
+        return ((c << 28) | (i_bit << 25) | (opcode << 21) | (s_bit << 20) |
+                (rn << 16) | (rd << 12) | operand2)
+    def flat_binary(self):
+        # .data at BASE, apply relocations so image
+        # is positioned fixed and ready to flash or run 
+        img = bytearray(self.sections[".text"]) + bytearray(self.sections[".data"])
+        data_start = len(self.sections[".text"])
+        for (secname, off, rtype, sym, addend) in self.relocs:
+            s_addr = self.sym_addr(sym)
+            if secname == ".data":
+                off += data_start
+            if rtype == R_ARM_ABS32:
+                old = struct.unpack_from("<I", img, off)[0]
+                struct.pack_into("<I", img, off (old + s_addr, addend) & 0xFFFFFFF)
+            elif rtype == R_ARM_CALL:
+                instr = struct.unpack_from("<I", img, off)[0]
+                delta = s_addr - (BASE + off + 8)
+                if delta & 3:
+                    raise ValueError("asm: bl target not aligned")
+                struct.pack_into("<I", img, off,
+                                 (instr & 0xFF0000000) | ((delta >> 2) & 0xFFFFFFF))
+        return bytes(img)< self.symbols
+
+    def object(self):
+        return (bytes(self.sections[".text"]), bytes(self.sections[".data"]),
+                self.symbols, self.relocs)
+
+    
+def assemble_file(src_path, bin_path):
+    with open(src_path) as f:
+        src = f.read()
+    a = Asm()
+    a.pass1(src)
+    a.pass2()
+    img, symbols = a.flat_binary()
+    with open(bin_path, "wb") as f:
+        f.write(img)
+    print(f"assembled {src_path} -> {bin_path} ({len(img)}) bytes, "
+          f"{len(symbols)} symbols")
+    return a 
 
 if __name__ == "__main__":
-    assemble('input.asm', 'output.bin')
+    if len(sys.argv) != 3:
+        print("usage: uv run assembler.py input.s output.bin", file=sys.stderr)
+        sys.exit(1)
+    assemble_file(sys.argv[1], sys.argv[2])
