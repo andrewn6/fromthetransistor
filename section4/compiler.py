@@ -3,9 +3,42 @@ toy c compiler, converted from compiler.hs
 
 pipeline: source text -> tokenize -> parse (ast) -> codegen -> arm assembly text
 
-so far converted from haskell: ast node classes, lexer, and the partial
-parser (program, type, ptr, top-level decl, global, params). the rest
-(expressions, statements, blocks, codegen) is stubbed with todos below.
+supported c subset (what parses and codegens today):
+
+  types      int, char, void, multi-level pointers, globals with constant
+             initializers, pooled string literals (.data/.asciz)
+  operators  || && == != < <= > >= + - * / % (div/mod via __divsi3/__modsi3
+             runtime helpers), unary - ! * &, a[i], f(args) (max 4 args),
+             right-assoc chained assignment
+  statements blocks, if/else, while, return, local decls with init,
+             expression stmts
+  semantics  pointer arithmetic scaled by element size, char vs word
+             load/store picking, short-circuit && ||, aapcs convention
+             (args r0-r3, return r0, fp/lr saved)
+
+course fit (outline section 4): matches the "cover the basics of compiler
+design, outputs arm assembly" goal. this is the classic teaching subset,
+same spirit as the haskell original.
+
+toolchain fit: proven end to end by build.py + test.c (compile -> assemble
+-> link -> qemu semihosting elf). NOT enough for the existing libc as
+written, and not for the downstream c programs (bootloader, kernel, fat,
+tcp). libc/ today uses, and the compiler lacks:
+
+  1. arrays as declared types (char buf[512]) - only pointer-style indexing
+  2. struct / typedef (malloc's block_t, libc.h's size_t etc.)
+  3. unsigned / const / sizeof
+  4. for / break / continue
+  5. compound assignment and ++/-- (+= *= i++ etc.)
+  6. #include / #define handling (or concatenate files in build.py)
+  7. varargs (printf(char *fmt, ...))
+
+order of attack for the toolchain: arrays first (buffers everywhere in
+bootloader/fat/tcp), then for/break/continue + compound assignment
+(ergonomics, mechanical), then struct (fat dir entries, tcp headers),
+sizeof/typedef with struct, unsigned last (mostly int works fine).
+varargs only if printf stays in-compiler; otherwise wrap putstr-style
+fixed-arity wrappers. #include can stay a build.py concat hack forever.
 """
 from __future__ import annotations
 import sys
