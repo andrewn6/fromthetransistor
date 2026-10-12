@@ -217,16 +217,17 @@ class Asm:
             return 0xE8BD0000 | parse_reglist(ops)         # ldmia sp!, {...}
 
         if mnem in ("b", "bl"):
-            # relocation instead of self-resolving: the linker patches it
+            # relocation instead of self-resolving: the linker patches it.
+            # 101L pattern lives in bits 27-24, cond nibble is separate
             self.relocs.append((secname, at, R_ARM_CALL, ops.strip(), 0))
-            return (c << 28) | (0xA0000000 if mnem == "b" else 0xB0000000) | 0xFFFFFE
+            return ((c << 28) | (0x0A000000 if mnem == "b" else 0x0B000000) | 0xFFFFFE)
 
         if mnem == "bx":
             return 0xE12FFF10 | reg(ops.strip())
 
         if mnem == "svc":
             imm = int(ops.replace("#", ""), 0) & 0xFFFFFF
-            return (c << 28) | 0xEF000000 | imm
+            return (c << 28) | 0x0F000000 | imm
 
         if mnem == "mul":
             rd, rm, rs = [reg(x) for x in ops.split(",")]

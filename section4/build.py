@@ -12,6 +12,7 @@ RUNTIME = r"""
 .text
 .global _start
 _start:
+    ldr sp, =0x00800000    @ set up stack: qemu -kernel boots with sp=0
     bl main
     mov r0, #0x18
     ldr r1, =0x20026
@@ -59,6 +60,7 @@ __udivsi3:
 
 @ signed: r0 = r0 / r1
 __divsi3:
+    push {r12, lr}
     cmp r0, #0
     rsblt r0, r0, #0
     movlt r12, #1
@@ -69,6 +71,7 @@ __divsi3:
     bl __udivsi3
     cmp r12, #0
     rsbne r0, r0, #0
+    pop {r12, lr}
     bx lr
 
 @ signed: r0 = r0 % r1 (sign follows dividend)
