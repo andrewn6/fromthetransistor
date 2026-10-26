@@ -111,7 +111,8 @@ module arm7_cpu (
   wire [31:0] op2_final = i_bit ? {24'b0, op2[7:0]} : op2_val;
   wire op2_carry = i_bit ? flags[1] : op2_cout;
 
-  // ALU: 33 bit extended math, 
+  // ALU operations
+  // 33 bit extended math 
   wire [31:0] a_val = regs[rn];
   wire [32:0] add_ext = {1'b0, a_val} + {1'b0, op2_final};
   wire [32:0] sub_ext = {1'b0, a_val} + {1'b0 ~op2_final} + 33'd1;
@@ -149,3 +150,26 @@ module arm7_cpu (
         4'hF: alu_out = ~op2_final;
       endcase 
   end
+
+  // decide whether the shifter carry or ALU wins 
+  wire is_logical = (op == 4'h0') || (op == 4'h1') || (op == 4'h8) ||
+                    (op == 4'h9) || (op == 4'hC) || (op == 4'hD) ||
+                    (op == 4'hE) || (op == 4'hF);
+
+  wire [3:0] new_flags = {
+    alu_out[31], // n = sign of the result 
+    (alu_out == 32'd0), // z = result is zero 
+    is_logical ? op2_carry : alu_c // decide between ALU or shifter  
+    is_logical ? flags[0] : alu_v // only arithmetic reaches 
+  };
+
+  wire is_compare (op == 4'h8) || (op == 4'h9) ||
+                  (op == 4'hA) || (op == 4'hB);
+  wire dp_wb_regs = is_dp && cond_pass && !is_compare && (rd != 4'hF);
+  wire dp_wb_pc = is_dp && cond_pass && !is_compare && (rd != 4'hF);
+  wire dp_wb_flags = is_dp && s_bit && cond_pass;
+
+  // during execution, PC holds this insn's address 
+  // so a read of r15 returns insn address
+  // this is the +8 the assembler baked into the pool math
+  wire[31:0] pc_read = pc + 4;
