@@ -1,3 +1,17 @@
+@ bootrom.asm - downloads a program over serial into ram, then jumps to it
+@
+@ does not assemble yet. fix before the 04-bootrom chapter:
+@   1. assembler.py: no .section directive -> use .text (or add support)
+@   2. assembler.py: no .equ constants -> add support, or inline the values
+@   3. symbolic immediates (#END_OF_CODE, #DATA_READY) fail int() parsing
+@   4. absolute mmio bases ([UART_STATUS] etc) have no arm encoding ->
+@      rewrite as: ldr r1, =UART_STATUS / ldr r0, [r1] (see compiler.py)
+@   5. line "RAM_BASE, 0x80000000 0" has a stray trailing 0
+@   6. RAM_BASE (0x80000000) != toolchain load address (0x10000) ->
+@      downloaded code is linked elsewhere, the jump would land nowhere
+@   7. bootrom must be linked at the reset vector (0x0), but assembler.py
+@      hardcodes BASE = 0x10000 for everything
+
 .section .text 
 .global _start
 

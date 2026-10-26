@@ -12,4 +12,5 @@ ORR R6, R4, R3
 LDR R7, [R6, #4]   
 STR R7, [R6, #8]    
 
-B 22               
+B done 
+done:

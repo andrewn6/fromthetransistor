@@ -1,14 +1,14 @@
 """
 two-pass arm assembler for the compiler's output
 
-pass 1: lay out sections (.text/.data), record label addresses, size
-        every instruction, and collect literal-pool requests for
-        'ldr rX, =value_or_label'.
-pass 2: encode instructions with resolved labels, emit the literal pool
-        at the end of .text, and record relocations (ABS32 for pool
-        words, CALL for b/bl) for the linker to patch.
+ARM assembler, two passed for compiler's output
 
-usage: python assembler.py input.s output.bin
+First, I layout the sections (.text/.data), record label addresses, size, every instruction
+and collect the literal-pool requests.
+
+Second, I encode the instructions with resolved labels, emit the literal pool at the end of .text and record relocations for the linker to patchy
+
+usage: uv run assembler.py input.s output.bin
 """
 import sys, struct
 
@@ -32,7 +32,7 @@ REGS = {"r0":0,"r1":1,"r2":2,"r3":3,"r4":4,"r5":5,"r6":6,"r7":7,
 R_ARM_ABS32, R_ARM_CALL = 2, 28
 
 def reg(tok):
-    tok = tok.strip()
+    tok = tok.strip().lower()
     if tok not in REGS:
         raise ValueError(f"asm: bad register {tok!r}")
     return REGS[tok]
@@ -217,10 +217,18 @@ class Asm:
             return 0xE8BD0000 | parse_reglist(ops)         # ldmia sp!, {...}
 
         if mnem in ("b", "bl"):
-            # relocation instead of self-resolving: the linker patches it.
-            # 101L pattern lives in bits 27-24, cond nibble is separate
-            self.relocs.append((secname, at, R_ARM_CALL, ops.strip(), 0))
-            return ((c << 28) | (0x0A000000 if mnem == "b" else 0x0B000000) | 0xFFFFFE)
+            target = ops.strip() # remove leading white space asm
+            base_word = 0x0A000000 if mnem == "b" else 0x0B000000
+            try:
+                taddr = int(target, 0)
+            except ValueError:
+                self.relocs.append((secname, at, R_ARM_CALL, target, 0))
+                return (c << 28) | base_word | 0xFFFFFE 
+            delta = taddr - (BASE + at + 8)
+            if delta & 3:
+                raise ValueError("asm: branch target not word-aligned")
+            return (c << 28) | base_word | ((delta >> 2) & 0XFFFFFF)
+
 
         if mnem == "bx":
             return 0xE12FFF10 | reg(ops.strip())

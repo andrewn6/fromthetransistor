@@ -1,13 +1,13 @@
 """
-toy c compiler, converted from compiler.hs
+C Compiler, written in Python
 
-pipeline: source text -> tokenize -> parse (ast) -> codegen -> arm assembly text
+Source text -> Tokenized -> Parsed -> Codegen -> ARM assembly text
 
 supported: int/char/void + pointers, globals, string literals, full binary
 op set (div/mod via __divsi3/__modsi3), unary - ! * &, a[i], calls (max 4
 args), if/else, while, return, local decls. proven by build.py + test.c.
 
-todo (in attack order, needed by libc/bootloader/kernel/fat/tcp):
+TODO: (needed by libc/bootloader/kernel/fat/tcp):
 
 1. arrays as declared types: char buf[512] locals and globals, sizeof
    tracking. only pointer-style indexing works today.
@@ -710,7 +710,6 @@ class CodeGen:
         self.frame = None        # current function's Frame (set in gen_func)
         self.epilogue = None     # current function's epilogue label (for return)
 
-    # ----- emit helpers -----
 
     def emit(self, line: str = ""):
         # append one line of assembly. blank line for spacing when empty.
