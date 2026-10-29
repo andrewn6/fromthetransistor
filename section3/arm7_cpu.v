@@ -9,7 +9,7 @@
 //      https://developer.arm.com/documentation/ddi0210/c/
 //
 // design:
-//   - single-cycle core: one instruction per clock, synchronous memory
+//   - fetch/execute phases, one memory access per clock, no pipeline
 //   - no pipeline, no mmu, no interrupts (later subchapters)
 //   - runs exactly the subset our assembler.py emits:
 //       data processing: and eor sub rsb add sbc rsc tst teq cmp cmn orr mov bic mvn
@@ -24,12 +24,14 @@
 `timescale 1ns / 1ps 
 
 module arm7_cpu (
-  input wire clk 
-  input wire reset 
+  input  wire        clk,
+  input  wire        reset,
   input wire [31:0] sram_data_in,
-  output reg reg [31:0] sram_addr,
+  output reg  [31:0] sram_addr,
   output reg [31:0] sram_data_out,
-  output reg        sram_we
+  output reg         sram_we,
+  output reg         sram_byte,   // 1 = byte access (ldrb/strb)
+  output reg         halted       // svc trap, testbench stops on it
 );
 
   reg [31:0] pc; // address of the instruction in the fetch 
@@ -56,7 +58,7 @@ module arm7_cpu (
   wire is_blk = (instr[27:25] == 3'b100); 
   wire is_br = (instr[27:25] == 3'b101);
   wire is_svc = (instr[27:24] == 4'b1111);
-  
+
   // condition codes 
   // found in ARM7 cond table in ddi 0029, section 3.2
   reg cond_pass;
@@ -65,7 +67,7 @@ module arm7_cpu (
           4'h0: cond_pass = flags[2]; // eq z set
           4'h1: cond_pass = ~flags[2]; // ne z clear
           4'h2: cond_pass = flags[1]; // cs c set
-          4'h3: cond_pass = ~flags[2]; // cc c clear
+          4'h3: cond_pass = ~flags[1]; // cc c clear
           4'h4: cond_pass = flags[3]; // mi n set
           4'h5: cond_pass = ~flags[3]; // pl n clear
           4'h6: cond_pass = flags[0]; // vs v set
@@ -77,7 +79,7 @@ module arm7_cpu (
           4'hC: cond_pass = ~flags[2] & (flags[3] == flags[0]); // gt
           4'hD: cond_pass = flags[2] | (flags[3] != flags[0]); // le
           4'hE: cond_pass = 1'b1; 
-          default: cond_pass 1'b0;
+          default: cond_pass = 1'b0;
       endcase
   end
 
@@ -88,19 +90,19 @@ module arm7_cpu (
   wire [31:0] rm_val = regs[rm];
 
   reg [31:0] op2_val;
-  reg        opt2_count;
+  reg        op2_cout;
   always @(*) begin 
       op2_val = rm_val;
       op2_cout = flags[1];
       if (sh_amt != 5'd0) begin 
-          case(sh_typ_)
+          case (sh_typ)
               2'b00: begin  // lsl
                 op2_val = rm_val << sh_amt;
                 op2_cout = rm_val[32 - sh_amt];
               end 
               2'b01: begin // lsr 
                 op2_val = rm_val >> sh_amt; 
-                opt2_count = rm_val[sh_amt - 1]; // last bit shifted out
+                op2_cout = rm_val[sh_amt - 1]; // last bit shifted out
               end 
               default: ;
           endcase 
@@ -115,14 +117,14 @@ module arm7_cpu (
   // 33 bit extended math 
   wire [31:0] a_val = regs[rn];
   wire [32:0] add_ext = {1'b0, a_val} + {1'b0, op2_final};
-  wire [32:0] sub_ext = {1'b0, a_val} + {1'b0 ~op2_final} + 33'd1;
+  wire [32:0] sub_ext = {1'b0, a_val} + {1'b0, ~op2_final} + 33'd1;
   wire [32:0] rsb_ext = {1'b0, op2_final} + {1'b0, ~a_val} + 33'd1;
-  wire [32:0] sbc_ext = {1'b0, a_val} + 1{'b0 ~op2_final} + {32'd0, flags[1]};
-  wire [32:0] rsc_ext = {1'b0, op2_final} + {1'b0 ~a_val} + {32'd0, flags[1]};
+  wire [32:0] sbc_ext = {1'b0, a_val} + {1'b0, ~op2_final} + {32'd0, flags[1]};
+  wire [32:0] rsc_ext = {1'b0, op2_final} + {1'b0, ~a_val} + {32'd0, flags[1]};
 
-  wire add_v = (a_val[32] == op2_final[31]) && (add_text[31] != a_val[32]);
-  wire sub_v = (a_val[31] != op2_final[32]) && (sub_ext[31] != a_val[31]);
-  wire rsb_v = (a_val[31] != op2_final[31]) && (rscb_ext[31] != op2_final[31]);
+  wire add_v = (a_val[31] == op2_final[31]) && (add_ext[31] != a_val[31]);
+  wire sub_v = (a_val[31] != op2_final[31]) && (sub_ext[31] != a_val[31]);
+  wire rsb_v = (a_val[31] != op2_final[31]) && (rsb_ext[31] != op2_final[31]);
   
   reg [31:0] alu_out;
   reg        alu_c;
@@ -139,9 +141,9 @@ module arm7_cpu (
         4'h4: begin alu_out = add_ext[31:0]; alu_c = add_ext[32]; alu_v = add_v; end // add 
         4'h5: ;
         4'h6: begin alu_out = sbc_ext[31:0]; alu_c = sbc_ext[32]; end // sbc
-        4'h7: begin alu_out = a_val & op2_final; // rsc 
+        4'h7: begin alu_out = rsc_ext[31:0]; alu_c = rsc_ext[32]; end // rsc 
         4'h8: alu_out = a_val & op2_final; // tst 
-        4'h9: alu_out = a_val ^ op2_final; / teq // teq
+        4'h9: alu_out = a_val ^ op2_final; // teq
         4'hA: begin alu_out = sub_ext[31:0]; alu_c = sub_ext[32]; alu_v = sub_v; end // cmp 
         4'hB: begin alu_out = add_ext[31:0]; alu_c = add_ext[32]; alu_v = add_v; end // cmn
         4'hC: alu_out = a_val | op2_final; // orr 
@@ -152,24 +154,73 @@ module arm7_cpu (
   end
 
   // decide whether the shifter carry or ALU wins 
-  wire is_logical = (op == 4'h0') || (op == 4'h1') || (op == 4'h8) ||
+  wire is_logical = (op == 4'h0) || (op == 4'h1) || (op == 4'h8) ||
                     (op == 4'h9) || (op == 4'hC) || (op == 4'hD) ||
                     (op == 4'hE) || (op == 4'hF);
 
   wire [3:0] new_flags = {
     alu_out[31], // n = sign of the result 
     (alu_out == 32'd0), // z = result is zero 
-    is_logical ? op2_carry : alu_c // decide between ALU or shifter  
+    is_logical ? op2_carry : alu_c, // decide between ALU or shifter  
     is_logical ? flags[0] : alu_v // only arithmetic reaches 
   };
 
-  wire is_compare (op == 4'h8) || (op == 4'h9) ||
+  wire is_compare = (op == 4'h8) || (op == 4'h9) ||
                   (op == 4'hA) || (op == 4'hB);
   wire dp_wb_regs = is_dp && cond_pass && !is_compare && (rd != 4'hF);
-  wire dp_wb_pc = is_dp && cond_pass && !is_compare && (rd != 4'hF);
+  wire dp_wb_pc = is_dp && cond_pass && !is_compare && (rd == 4'hF);
   wire dp_wb_flags = is_dp && s_bit && cond_pass;
 
-  // during execution, PC holds this insn's address 
-  // so a read of r15 returns insn address
+  // during execution, PC holds this insn's address + 4
+  // so a read of r15 returns insn address + 8
   // this is the +8 the assembler baked into the pool math
   wire[31:0] pc_read = pc + 4;
+
+  wire ls_u = instr[23];
+  wire ls_b = instr[22];
+  wire ls_l = instr[20];
+  wire [31:0] ls_off = {20'b0, instr[11:0]};
+  wire [31:0] ls_base = (rn == 4'hF) ? pc_read : regs[rn];
+  wire [31:0] ls_ea = ls_u ? (ls_base + ls_off)
+                             : (ls_base - ls_off);
+
+  // stores data: strb puts byte in the low lane                        
+  wire [31:0] ls_wdata = ls_b ? {24'b0, regs[rd][7:0]} : regs[rd];
+  wire [31:0] ls_rdata = ls_b ? {24'b0, sram_data_in[7:0]}
+                              : sram_data_in;
+  
+  // a store never writes the reg file, a load writes rd 
+  wire ls_wb = is_ls && cond_pass && ls_l;
+
+  reg [3:0] blk_idx; 
+  reg [31:0] blk_addr;
+
+  wire blk_l = instr[20];
+  wire [15:0] blk_list = instr[15:0];
+
+  wire [4:0] blk_n = instr[15] + instr[14] + instr[13] + instr[13] +
+                     instr[11] + instr[10] + instr[9] + instr[8] +
+                     instr[7] + instr[6] + instr[5] + instr[4] +
+                     instr[3] + instr[2] + instr[1] + instr[0];
+
+  // first bus address: STMDB starts at sp - 4n, ldmia starts at sp
+  wire [31:0] blk_start = blk_l ? regs[13]
+                                : (regs[13] - {blk_n, 2'b00});
+
+  wire br_link = instr[24];
+  wire [31:0] br_imm = {{6{instr[23]}}, instr[23:0], 2'b00}; // <<2
+  wire [31:0] br_dest = pc + 4 + br_imm; // pc = insn+4, total is x2 thusfore 8 
+
+  wire is_bx = is_dp && (instr[27:20] && 8'h12) &&
+                (instr[19:12] == 8'hFF) && (instr[11:4] == 4'b0001);
+
+
+  wire[31:0] bx_target = regs[rm] & 32'hFFFFFFE; // armv4 
+
+  wire is_mul = is_dp && !i_bit && (instr [27:21] == 7'b0000000) &&
+                (instr[7:4] == 4'b1001);
+  wire [3:0] rs_reg = op2[11:8];
+  wire [31:0] mul_rest = rm_val * regs[rs_reg]; // low 32 bits
+  // push/pop = stmdb/ldmia with sp writeback 
+  // assembler.py encodes:
+endmodule
