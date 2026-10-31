@@ -3,24 +3,24 @@ C Compiler, written in Python
 
 Source text -> Tokenized -> Parsed -> Codegen -> ARM assembly text
 
-supported: int/char/void + pointers, globals, string literals, full binary
-op set (div/mod via __divsi3/__modsi3), unary - ! * &, a[i], calls (max 4
-args), if/else, while, return, local decls. proven by build.py + test.c.
+supported: int/char/void + pointers, arrays (char buf[512] locals and
+globals, decay to element pointer, string init), globals, string literals,
+full binary op set (div/mod via __divsi3/__modsi3), unary - ! * &, a[i],
+calls (max 4 args), if/else, while, return, local decls. proven by
+build.py + test.c.
 
 TODO: (needed by libc/bootloader/kernel/fat/tcp):
 
-1. arrays as declared types: char buf[512] locals and globals, sizeof
-   tracking. only pointer-style indexing works today.
-2. for / break / continue.
-3. compound assignment + ++/--: += -= *= /= %= x++ x--.
-4. struct: block_t (malloc), fat dir entries, tcp headers. member access,
+1. for / break / continue.
+2. compound assignment + ++/--: += -= *= /= %= x++ x--.
+3. struct: block_t (malloc), fat dir entries, tcp headers. member access,
    nested types, layout/offsets.
-5. sizeof + typedef: size_t, block_t etc.
-6. unsigned / const: qualifiers parse-and-ignore first, unsigned semantics
+4. sizeof + typedef: size_t, block_t etc.
+5. unsigned / const: qualifiers parse-and-ignore first, unsigned semantics
    last (int mostly fine).
-7. varargs: printf(char *fmt, ...) - or skip and keep fixed-arity
+6. varargs: printf(char *fmt, ...) - or skip and keep fixed-arity
    putstr-style wrappers in libc.
-8. #include / #define: or keep the build.py concat hack forever.
+7. #include / #define: or keep the build.py concat hack forever.
 """
 from __future__ import annotations
 import sys
@@ -37,6 +37,10 @@ class TInt(Type): pass
 class TChar(Type): pass
 @dataclass(frozen=True)
 class TVoid(Type): pass
+@dataclass(frozen=True)
+class TArr(Type):
+    elem: Type 
+    count: int 
 @dataclass(frozen=True)
 class TPtr(Type):
     inner: Type
@@ -302,6 +306,17 @@ class Parser:
             raise SyntaxError(f"parse: expected type, got {self.preview()}")
         self.pos += 1
         return self.parse_ptr(base)
+    
+    def parse_array_suffix(self, t: Type) -> Type:
+        if self.peek() == Tok(TP, "["):
+            self.pos += 1 
+            n = self.peek()
+            if n is None or n.kind != TINTL:
+                raise SyntaxError(f"parse: expected array size, got {self.preview()}")
+            self.pos += 1 
+            self.expect(TP, "]")
+            return TArr(t, n.val)
+        return t 
 
     def parse_ptr(self, t: Type) -> Type:
         # consume trailing stars, nesting TPtr for each pointer level
@@ -328,6 +343,7 @@ class Parser:
 
     def parse_global(self, ty: Type, name: str):
         # finish a global: optional initializer then ';'
+        ty = self.parse_array_suffix(ty)
         if self.peek() == Tok(TO, "="):
             self.pos += 1
             e = self.parse_expr()
@@ -434,6 +450,7 @@ class Parser:
             raise SyntaxError(f"parse: expected declarator, got {self.preview()}")
         name = name_tok.val
         self.pos += 1
+        ty = self.parse_array_suffix(ty)
         init = None
         if self.peek() == Tok(TO, "="):
             self.pos += 1
@@ -563,7 +580,7 @@ class Parser:
             self.expect(TP, ")")
             return e
         raise SyntaxError(f"parse: expected expression, got {self.preview()}")
-
+    
 # Target is 32bit ARM, int, char and every pointer all occupy one 
 WORD = 4 
 
@@ -572,9 +589,15 @@ def type_size(t: Type) -> int:
         return 1 
     if isinstance(t, (TInt, TPtr)):
         return WORD 
+    if isinstance(t, TArr):
+        return t.count * type_size(t.elem)
     if isinstance(t, TVoid):
         raise TypeError("codegen: void has no size")
     raise TypeError(f"codegen: unknown type {t}")
+
+
+def decay(t: Type) -> Type:
+    return TPtr(t.elem) if isinstance(t, TArr) else t 
 
 def scale_of(t: Type) -> int:
     # pointer arithmetic step: *(p + i) advances by the size of *p.
@@ -591,7 +614,7 @@ class Frame:
 
     def declare(self, name: str, t: Type) -> int:
         if name not in self.slots:
-            self.size += WORD 
+            self.size += (type_size(t) + 3) & ~3 
             self.slots[name] = -self.size 
             self.types[name] = t 
         return self.slots[name]
@@ -745,9 +768,21 @@ class CodeGen:
             elif isinstance(g.init, CharLit):
                 self.emit(f"    .{'byte' if isinstance(g.type, TChar) else 'word'} {g.init.val}")
             elif isinstance(g.init, StrLit):
-                # a global char* initialized to a string literal points at
-                # the literal's label; the bytes are emitted below.
-                self.emit(f"    .word {self.strings[g.init.val]}")
+                if isinstance(g.type, TArr):
+                    # char a[N] = "s": bytes inline, zero padded
+                    pad = g.type.count - len(g.init.val) - 1
+                    if pad < 0:
+                        raise NotImplementedError("codegen: array initializer too long")
+                    self.emit(f"    .asciz {c_string_literal(g.init.val)}")
+                    if pad:
+                        self.emit(f"    .zero {pad}")
+                else:
+                    # a global char* initialized to a string literal points at
+                    # the literal's label; the bytes are emitted below.
+                    self.emit(f"    .word {self.strings[g.init.val]}")
+            elif isinstance(g.type, TArr):
+                raise NotImplementedError(
+                    f"codegen: array global {g.name!r} only takes a string init")
             else:
                 raise NotImplementedError(
                     f"codegen: global initializer must be a constant, got {g.init}")
@@ -784,15 +819,15 @@ class CodeGen:
         self.emit(f".global {fn.name}")
         self.label(fn.name)
 
-        # prologue: save fp/lr, set fp to the new frame base, reserve locals.
+        # prologue: save fp/lr, set fp to the new frame base.
         self.emit("    push {fp, lr}")
         self.emit("    mov fp, sp")
-        if frame_bytes:
-            self.emit(f"    sub sp, sp, #{frame_bytes}")
 
         # spill incoming register args (r0-r3) into their stack slots so the
-        # rest of codegen can treat params like any other local. args beyond
-        # the fourth were passed on the stack by the caller (handled later).
+        # rest of codegen can treat params like any other local. slots are
+        # fp-relative so this works before sp is moved. args beyond the
+        # fourth were passed on the stack by the caller (handled later).
+        # spilling first also frees r0-r3 as scratch for the big-frame sub.
         for i, (ty, name) in enumerate(fn.params):
             if i < 4:
                 off = self.frame.offset(name)
@@ -800,6 +835,14 @@ class CodeGen:
             else:
                 raise NotImplementedError(
                     "codegen: more than 4 params (stack args) not yet supported")
+
+        # reserve locals. imm only encodes 0-255, big frames go via a register.
+        if frame_bytes:
+            if frame_bytes <= 255:
+                self.emit(f"    sub sp, sp, #{frame_bytes}")
+            else:
+                self.emit(f"    ldr r1, ={frame_bytes}")
+                self.emit("    sub sp, sp, r1")
 
         # body
         self.gen_stmt(fn.body)
@@ -833,7 +876,23 @@ class CodeGen:
             # locals were pre-allocated by collect_locals; just store the
             # initializer if there is one. uninitialized locals hold garbage,
             # same as real c.
-            if s.init is not None:
+            if isinstance(s.type, TArr) and isinstance(s.init, StrLit):
+                # char a[N] = "s": copy from the literal's label, zero the rest
+                if not isinstance(s.type.elem, TChar):
+                    raise NotImplementedError("codegen: only char arrays take a string init")
+                n = len(s.init.val) + 1
+                if n > s.type.count:
+                    raise NotImplementedError("codegen: array initializer too long")
+                off = self.frame.offset(s.name)
+                self.emit(f"    ldr r1, ={self.strings[s.init.val]}")
+                for i in range(n):
+                    self.emit(f"    ldrb r0, [r1, #{i}]")
+                    self.emit(f"    strb r0, [fp, #{off + i}]")
+                if n < s.type.count:
+                    self.emit("    mov r0, #0")
+                    for i in range(n, s.type.count):
+                        self.emit(f"    strb r0, [fp, #{off + i}]")
+            elif s.init is not None:
                 self.gen_expr(s.init)          # value in r0
                 off = self.frame.offset(s.name)
                 if isinstance(s.type, TChar):
@@ -877,6 +936,15 @@ class CodeGen:
     # minimal local inference: just enough to pick ldr vs ldrb/str vs strb
     # and to scale pointer arithmetic. undeclared names (callees) assume int.
 
+    def declared_type(self, name: str) -> Type | None:
+        # the type a name was declared with, local or global; none if undeclared
+        if self.frame is not None and self.frame.has(name):
+            return self.frame.type_of(name)
+        for g in self.globals:
+            if g.name == name:
+                return g.type
+        return None
+
     def infer_type(self, e: Expr) -> Type:
         if isinstance(e, IntLit):
             return TInt()
@@ -885,12 +953,8 @@ class CodeGen:
         if isinstance(e, StrLit):
             return TPtr(TChar())
         if isinstance(e, Var):
-            if self.frame is not None and self.frame.has(e.name):
-                return self.frame.type_of(e.name)
-            for g in self.globals:
-                if g.name == e.name:
-                    return g.type
-            return TInt()
+            t = self.declared_type(e.name)
+            return decay(t) if t is not None else TInt()
         if isinstance(e, Deref):
             t = self.infer_type(e.operand)
             return t.inner if isinstance(t, TPtr) else TInt()
@@ -900,6 +964,11 @@ class CodeGen:
         if isinstance(e, Assign):
             return self.infer_type(e.target)
         if isinstance(e, AddrOf):
+            # &buf: same address as buf, treat as element pointer
+            if isinstance(e.operand, Var):
+                t = self.declared_type(e.operand.name)
+                if t is not None and isinstance(t, TArr):
+                    return TPtr(t.elem)
             return TPtr(self.infer_type(e.operand))
         if isinstance(e, UnOp):
             return TInt()          # !x and -x are ints
@@ -929,12 +998,19 @@ class CodeGen:
     # ----- lvalues -----
     # gen_lvalue evaluates the ADDRESS of an assignable expression into r0.
 
+    def emit_local_addr(self, off: int):
+        # r0 = fp + off. imm only encodes 0-255, big offsets go via a literal.
+        if abs(off) <= 255:
+            self.emit(f"    add r0, fp, #{off}")
+        else:
+            self.emit(f"    ldr r0, ={off}")
+            self.emit("    add r0, fp, r0")
+
     def gen_lvalue(self, e: Expr):
         if isinstance(e, Var):
             if self.frame is not None and self.frame.has(e.name):
                 # local: address = fp + slot offset
-                off = self.frame.offset(e.name)
-                self.emit(f"    add r0, fp, #{off}")
+                self.emit_local_addr(self.frame.offset(e.name))
             else:
                 # global: address = its linker-resolved symbol
                 self.emit(f"    ldr r0, ={e.name}")
@@ -981,20 +1057,30 @@ class CodeGen:
             self.emit(f"    ldr r0, ={self.strings[e.val]}")
 
         elif isinstance(e, Var):
-            if self.frame is not None and self.frame.has(e.name):
+            t = self.declared_type(e.name)
+            if t is not None and isinstance(t, TArr):
+                # array decays: value is its address
+                if self.frame is not None and self.frame.has(e.name):
+                    self.emit_local_addr(self.frame.offset(e.name))
+                else:
+                    self.emit(f"    ldr r0, ={e.name}")
+            elif self.frame is not None and self.frame.has(e.name):
                 off = self.frame.offset(e.name)
                 insn = self.load_insn(self.frame.type_of(e.name))
                 self.emit(f"    {insn} r0, [fp, #{off}]")
             else:
                 # global: load directly off its symbol
                 self.emit(f"    ldr r0, ={e.name}")
-                t = self.infer_type(e)
-                insn = self.load_insn(t)
+                insn = self.load_insn(decay(t))
                 self.emit(f"    {insn} r0, [r0]")
 
         elif isinstance(e, Assign):
             # address of target, value of rhs, store. value stays in r0
             # so 'x = y = 5' chains work.
+            if isinstance(e.target, Var):
+                dt = self.declared_type(e.target.name)
+                if dt is not None and isinstance(dt, TArr):
+                    raise TypeError(f"codegen: cannot assign to array {e.target.name!r}")
             t = self.infer_type(e.target)
             self.gen_lvalue(e.target)      # address in r0
             self.emit("    push {r0}")
