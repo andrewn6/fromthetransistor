@@ -6,21 +6,19 @@ Source text -> Tokenized -> Parsed -> Codegen -> ARM assembly text
 supported: int/char/void + pointers, arrays (char buf[512] locals and
 globals, decay to element pointer, string init), globals, string literals,
 full binary op set (div/mod via __divsi3/__modsi3), unary - ! * &, a[i],
-calls (max 4 args), if/else, while, return, local decls. proven by
-build.py + test.c.
+calls (max 4 args), if/else, while, for, break/continue, local decls,
+compound assignment (+= -= *= /= %=), x++/x--. proven by build.py + test.c.
 
 TODO: (needed by libc/bootloader/kernel/fat/tcp):
 
-1. for / break / continue.
-2. compound assignment + ++/--: += -= *= /= %= x++ x--.
-3. struct: block_t (malloc), fat dir entries, tcp headers. member access,
+1. struct: block_t (malloc), fat dir entries, tcp headers. member access,
    nested types, layout/offsets.
-4. sizeof + typedef: size_t, block_t etc.
-5. unsigned / const: qualifiers parse-and-ignore first, unsigned semantics
+2. sizeof + typedef: size_t, block_t etc.
+3. unsigned / const: qualifiers parse-and-ignore first, unsigned semantics
    last (int mostly fine).
-6. varargs: printf(char *fmt, ...) - or skip and keep fixed-arity
+4. varargs: printf(char *fmt, ...) - or skip and keep fixed-arity
    putstr-style wrappers in libc.
-7. #include / #define: or keep the build.py concat hack forever.
+5. #include / #define: or keep the build.py concat hack forever.
 """
 from __future__ import annotations
 import sys
@@ -55,6 +53,9 @@ AND, OR = "and", "or"
 # unary operators such as negate and logical not
 NEG, NOT = "neg", "not"
 
+# compound assignment token -> the underlying binary op
+COMPOUND = {"+=": ADD, "-=": SUB, "*=": MUL, "/=": DIV, "%=": MOD}
+
 # ---------- ast: expressions ----------
 
 # expr models all expression forms in our toy c language
@@ -76,6 +77,15 @@ class Var(Expr):
 class Assign(Expr):
     target: Expr
     value: Expr
+@dataclass 
+class CompAssign(Expr):
+    op: str 
+    target: Expr
+    value: Expr
+@dataclass 
+class PostIncDec(Expr):
+    target: Expr 
+    delta: int
 @dataclass
 class BinOp(Expr):
     op: str
@@ -174,6 +184,7 @@ KEYWORDS = ["int", "char", "void", "if", "while", "return", "else", "for", "brea
 # ordered so multi-char symbols match before single chars
 OPERATORS = [
     "==", "!=", "<=", ">=", "&&", "||",
+    "+=", "-=", "*=", "/=", "%=", "++", "--",
     "+", "-", "*", "/", "%", "<", ">", "=", "!", "&",
 ]
 
@@ -518,10 +529,15 @@ class Parser:
     def parse_assign(self) -> Expr:
         # right associative: lhs '=' rhs
         lhs = self.parse_logic_or()
-        if self.peek() == Tok(TO, "="):
-            self.pos += 1
+        t = self.peek()
+        if t == Tok(TO, "="):
+            self.pos += 1 
             rhs = self.parse_assign()
             return Assign(lhs, rhs)
+        if t is not None and t.kind == TO and t.val in COMPOUND:
+            self.pos += 1 
+            rhs = self.parse_assign()
+            return CompAssign(COMPOUND[t.val], lhs, rhs)
         return lhs
 
     def parse_binop(self, ops: dict, lower) -> Expr:
@@ -589,6 +605,12 @@ class Parser:
                 idx = self.parse_expr()
                 self.expect(TP, "]")
                 e = Index(e, idx)
+            elif t == Tok(TO, "++"):
+                self.pos += 1 
+                e = PostIncDec(e, 1)
+            elif t == Tok(TO, "--"):
+                self.pos += 1 
+                e = PostIncDec(e, -1)
             else:
                 return e
 
@@ -715,6 +737,10 @@ def collect_strings(decls: list) -> dict:
 
         elif isinstance(e, Assign):
             visit_expr(e.target); visit_expr(e.value)
+        elif isinstance(e, CompAssign):
+            visit_expr(e.target); visit_expr(e.value)
+        elif isinstance(e, PostIncDec):
+            visit_expr(e.target)
         elif isinstance(e, BinOp):
             visit_expr(e.lhs); visit_expr(e.rhs)
         elif isinstance(e, UnOp):
@@ -1059,6 +1085,10 @@ class CodeGen:
             return t.inner if isinstance(t, TPtr) else TInt()
         if isinstance(e, Assign):
             return self.infer_type(e.target)
+        if isinstance(e, CompAssign):
+            return self.infer_type(e.target)
+        if isinstance(e, PostIncDec):
+            return self.infer_type(e.target)
         if isinstance(e, AddrOf):
             # &buf: same address as buf, treat as element pointer
             if isinstance(e.operand, Var):
@@ -1184,6 +1214,65 @@ class CodeGen:
             self.emit("    pop {r1}")      # r1 = address, r0 = value
             self.emit(f"    {self.store_insn(t)} r0, [r1]")
 
+        elif isinstance(e, CompAssign):
+            # like Assign, but reloads the target and applies op. the target
+            # address is computed once, so a[i] += 1 evaluates a and i once.
+            if isinstance(e.target, Var):
+                dt = self.declared_type(e.target.name)
+                if dt is not None and isinstance(dt, TArr):
+                    raise TypeError(f"codegen: cannot assign to array {e.target.name!r}")
+            t = self.infer_type(e.target)
+            self.gen_lvalue(e.target)                # address in r0
+            self.emit("    push {r0}")
+            self.emit(f"    {self.load_insn(t)} r0, [r0]")   # old value in r0
+            self.emit("    push {r0}")
+            self.gen_expr(e.value)                   # rhs in r0
+            # pointer targets scale the rhs, like p + n
+            if e.op in (ADD, SUB) and isinstance(t, TPtr):
+                scale = scale_of(t)
+                if scale != 1:
+                    self.emit(f"    mov r1, #{scale}")
+                    self.emit("    mul r0, r0, r1")
+            self.emit("    pop {r1}")                # r1 = old value
+            if e.op == ADD:
+                self.emit("    add r0, r1, r0")
+            elif e.op == SUB:
+                self.emit("    sub r0, r1, r0")
+            elif e.op == MUL:
+                self.emit("    mul r0, r1, r0")
+            elif e.op in (DIV, MOD):
+                # no divide in our arm subset: __divsi3(r0=num, r1=den)
+                self.emit("    mov r2, r0")          # save rhs
+                self.emit("    mov r0, r1")          # r0 = old value
+                self.emit("    mov r1, r2")          # r1 = rhs
+                self.emit(f"    bl {'__divsi3' if e.op == DIV else '__modsi3'}")
+            else:
+                raise NotImplementedError(f"gen_expr: unknown compound op {e.op}")
+            self.emit("    pop {r1}")                # r1 = address
+            self.emit(f"    {self.store_insn(t)} r0, [r1]")
+            # new value stays in r0 so 'x = y += 1' chains work
+
+        elif isinstance(e, PostIncDec):
+            # x++ / x--: memory gets old + delta, expression yields the OLD
+            # value. pointer targets step by scale_of, so p++ advances a
+            # whole element.
+            if isinstance(e.target, Var):
+                dt = self.declared_type(e.target.name)
+                if dt is not None and isinstance(dt, TArr):
+                    raise TypeError(f"codegen: cannot increment array {e.target.name!r}")
+            t = self.infer_type(e.target)
+            step = e.delta * (scale_of(t) if isinstance(t, TPtr) else 1)
+            self.gen_lvalue(e.target)                # address in r0
+            self.emit("    push {r0}")
+            self.emit(f"    {self.load_insn(t)} r0, [r0]")   # old value in r0
+            self.emit("    push {r0}")
+            insn = "add" if step >= 0 else "sub"
+            self.emit(f"    {insn} r0, r0, #{abs(step)}")
+            self.emit("    pop {r1}")                # r1 = old value
+            self.emit("    pop {r2}")                # r2 = address
+            self.emit(f"    {self.store_insn(t)} r0, [r2]")
+            self.emit("    mov r0, r1")              # result = old value
+            
         elif isinstance(e, AddrOf):
             self.gen_lvalue(e.operand)
 

@@ -117,6 +117,50 @@ int main() {
   itoa(x, s);
   putstr(s);
   putstr("\n");
-  
+
+  // compound assignment: (((10+5-3)*2)/5)%3 -> 1
+  x = 10;
+  x += 5;
+  x -= 3;
+  x *= 2;
+  x /= 5;
+  x %= 3;
+  itoa(x, s);
+  putstr(s);
+  putstr("\n");
+
+  // x++ / x-- as expressions yield the old value
+  int y;
+  x = 1;
+  y = x++;
+  itoa(y, s);
+  putstr(s);
+  putstr(" ");
+  itoa(x, s);
+  putstr(s);
+  putstr(" ");
+  y = x--;
+  itoa(y, s);
+  putstr(s);
+  putstr(" ");
+  itoa(x, s);
+  putstr(s);
+  putstr("\n");
+
+  // p += 2 skips two chars, *p++ yields 'l' (108)
+  x = 99;
+  for (int i = 0; i < 10; i++) {
+    if (i == 2) {
+      break;
+    }
+  }
+  char *p;
+  p = "hello";
+  p += 2;
+  x = *p++;
+  itoa(x, s);
+  putstr(s);
+  putstr("\n");
+
   return 0;
 }
