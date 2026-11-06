@@ -407,6 +407,8 @@ class Parser:
             return self.parse_if()
         if t == Tok(TKW, "while"):
             return self.parse_while()
+        if t == Tok(TKW, "for"):
+            return self.parse_for()
         if t == Tok(TKW, "return"):
             return self.parse_return()
         if self.is_type_start():
@@ -677,6 +679,8 @@ def collect_locals(frame: Frame, stmt: Stmt):
     elif isinstance(stmt, SWhile):
         collect_locals(frame, stmt.body)
     elif isinstance(stmt, SFor):
+        if stmt.init is not None:
+            collect_locals(frame, stmt.init)
         collect_locals(frame, stmt.body)
 
 def collect_strings(decls: list) -> dict:
