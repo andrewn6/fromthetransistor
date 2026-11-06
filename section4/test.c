@@ -62,5 +62,61 @@ int main() {
   if (x == 104) {
     putstr("index load ok\n");
   }
+  x = 0;
+  for (int i = 1; i <= 10; i = i + 1) {
+    x = x + i;
+  }
+  itoa(x, s);
+  putstr(s);
+  putstr("\n");
+
+  x = 0;
+  for (int i = 0; i < 100; i = i + 1) {
+    if (i == 7) {
+      break;
+    }
+    if (i % 2 == 0) {
+      continue;
+    }
+    x = x + i;
+  }
+  itoa(x, s);
+  putstr(s);
+  putstr("\n");
+
+  int i; 
+  i = 0;
+  x = 0; 
+  while (i < 10) {
+    i = i + 1;
+    if (i == 3) {
+      continue;
+    }
+    if (i == 8) {
+      break;
+    }
+    x = x + i;
+  }
+  itoa(x, s);
+  putstr(s);
+  putstr("\n");
+
+  x = 0;
+  for (int a = 0; a < 3; a = a + 1) {
+    for (int b = 0; b < 10; b = b + 1) {
+      if (b == 2) {
+        break;
+      }
+      if (b == 1) {
+        continue;
+      }
+      x = x + 1;
+    }
+  }
+
+  itoa(x, s);
+  putstr(s);
+  putstr("\n");
+  
   return 0;
 }

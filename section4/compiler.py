@@ -134,6 +134,10 @@ class SFor(Stmt):
     cond: Expr | None 
     step: Expr | None 
     body: Stmt
+@dataclass 
+class SBreak(Stmt): pass 
+@dataclass
+class SContinue(Stmt): pass
 
 # ---------- ast: top level ----------
 
@@ -165,7 +169,7 @@ class Tok:
         return f"{self.kind}:{self.val!r}"
 
 # reserved words so identifiers do not capture them
-KEYWORDS = ["int", "char", "void", "if", "while", "return", "else", "for"]
+KEYWORDS = ["int", "char", "void", "if", "while", "return", "else", "for", "break", "continue"]
 
 # ordered so multi-char symbols match before single chars
 OPERATORS = [
@@ -411,6 +415,10 @@ class Parser:
             return self.parse_for()
         if t == Tok(TKW, "return"):
             return self.parse_return()
+        if t == Tok(TKW, "break"):
+            return self.parse_break()
+        if t == Tok(TKW, "continue"):
+            return self.parse_continue()
         if self.is_type_start():
             return self.parse_decl()
         # fallthrough: expression statement, 'expr ;'
@@ -463,6 +471,16 @@ class Parser:
         body = self.parse_stmt()
         return SFor(init, cond, step, body)
 
+    def parse_break(self) -> Stmt:
+        self.expect(TKW, "break")
+        self.expect(TP, ";")
+        return SBreak()
+
+    def parse_continue(self) -> Stmt:
+        self.expect(TKW, "continue")
+        self.expect(TP, ";")
+        return SContinue()
+    
     def parse_return(self) -> Stmt:
         # 'return' [expr] ';'
         self.expect(TKW, "return")
@@ -777,6 +795,7 @@ class CodeGen:
         self.label_count = 0
         self.frame = None        # current function's Frame (set in gen_func)
         self.epilogue = None     # current function's epilogue label (for return)
+        self.loops = [] # stack of. (break_target, continue_target)
 
 
     def emit(self, line: str = ""):
@@ -970,27 +989,42 @@ class CodeGen:
             self.gen_expr(s.cond)              # value in r0
             self.emit("    cmp r0, #0")
             self.emit(f"    beq {end_l}")
+            self.loops.append((end_l, top_l))  # continue -> re-test cond
             self.gen_stmt(s.body)
+            self.loops.pop()
             self.emit(f"    b {top_l}")
             self.label(end_l)
 
         elif isinstance(s, SFor):
-            # lower as: init; top: cond -> beq end; body; step; b top; end:
+            # lower as: init; top: cond -> beq end; body; step:; step; b top; end:
             if s.init is not None:
                 self.gen_stmt(s.init)
             top_l = self.new_label("Lfor")
+            step_l = self.new_label("Lforstep")
             end_l = self.new_label("Lforend")
             self.label(top_l)
             if s.cond is not None:
                 self.gen_expr(s.cond)          # value in r0
                 self.emit("    cmp r0, #0")
                 self.emit(f"    beq {end_l}")
+            self.loops.append((end_l, step_l)) # continue -> run step
             self.gen_stmt(s.body)
+            self.loops.pop()
+            self.label(step_l)
             if s.step is not None:
                 self.gen_expr(s.step)          # result discarded
             self.emit(f"    b {top_l}")
             self.label(end_l)
 
+        elif isinstance(s, SBreak):
+            if not self.loops:
+                raise SyntaxError("gen_stmt: break outside a loop")
+            self.emit(f"    b {self.loops[-1][0]}")
+
+        elif isinstance(s, SContinue):
+            if not self.loops:
+                raise SyntaxError("gen_stmt: continue outside a loop")
+            self.emit(f"    b {self.loops[-1][1]}")
         else:
             raise NotImplementedError(f"gen_stmt: unknown stmt {s}")
 
