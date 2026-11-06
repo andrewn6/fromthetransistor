@@ -128,6 +128,12 @@ class SDecl(Stmt):
     type: Type
     name: str
     init: Expr | None
+@dataclass 
+class SFor(Stmt):
+    init: Stmt | None 
+    cond: Expr | None 
+    step: Expr | None 
+    body: Stmt
 
 # ---------- ast: top level ----------
 
@@ -159,7 +165,7 @@ class Tok:
         return f"{self.kind}:{self.val!r}"
 
 # reserved words so identifiers do not capture them
-KEYWORDS = ["int", "char", "void", "if", "while", "return", "else"]
+KEYWORDS = ["int", "char", "void", "if", "while", "return", "else", "for"]
 
 # ordered so multi-char symbols match before single chars
 OPERATORS = [
@@ -432,6 +438,29 @@ class Parser:
         body = self.parse_stmt()
         return SWhile(cond, body)
 
+    def parse_for(self) -> Stmt:
+        self.expect(TKW, "for")
+        self.expect(TP, "(")
+        if self.peek() == Tok(TP, ";"):
+            self.pos += 1 
+            init = None 
+        elif self.is_type_start():
+            init = self.parse_decl()
+        else:
+            e = self.parse_expr() 
+            self.expect(TP, ";")
+            init = SExpr(e)
+        cond = None 
+        if self.peek() != Tok(TP, ";"):
+            cond = self.parse_expr()
+        self.expect(TP, ";")
+        step = None 
+        if self.peek() != Tok(TP, ")"):
+            step = self.parse_expr()
+        self.expect(TP, ")")
+        body = self.parse_stmt()
+        return SFor(init, cond, step, body)
+
     def parse_return(self) -> Stmt:
         # 'return' [expr] ';'
         self.expect(TKW, "return")
@@ -582,7 +611,7 @@ class Parser:
         raise SyntaxError(f"parse: expected expression, got {self.preview()}")
     
 # Target is 32bit ARM, int, char and every pointer all occupy one 
-WORD = 4 
+WORD = 4
 
 def type_size(t: Type) -> int:
     if isinstance(t, TChar):
@@ -647,6 +676,8 @@ def collect_locals(frame: Frame, stmt: Stmt):
             collect_locals(frame, stmt.els)
     elif isinstance(stmt, SWhile):
         collect_locals(frame, stmt.body)
+    elif isinstance(stmt, SFor):
+        collect_locals(frame, stmt.body)
 
 def collect_strings(decls: list) -> dict:
     out = {}
@@ -659,6 +690,7 @@ def collect_strings(decls: list) -> dict:
             if e.val not in out:
                 out[e.val] = f".Lstr{counter[0]}"
                 counter[0] += 1
+
         elif isinstance(e, Assign):
             visit_expr(e.target); visit_expr(e.value)
         elif isinstance(e, BinOp):
@@ -685,6 +717,15 @@ def collect_strings(decls: list) -> dict:
                 visit_stmt(s.els)
         elif isinstance(s, SWhile):
             visit_expr(s.cond); visit_stmt(s.body)
+            
+        elif isinstance(s, SFor):
+            if s.init is not None:
+                visit_stmt(s.init)
+            if s.cond is not None:
+                visit_expr(s.cond)
+            if s.step is not None:
+                visit_expr(s.step)
+                visit_stmt(s.body)
         elif isinstance(s, SReturn):
             visit_expr(s.expr)
         elif isinstance(s, SDecl):
@@ -926,6 +967,23 @@ class CodeGen:
             self.emit("    cmp r0, #0")
             self.emit(f"    beq {end_l}")
             self.gen_stmt(s.body)
+            self.emit(f"    b {top_l}")
+            self.label(end_l)
+
+        elif isinstance(s, SFor):
+            # lower as: init; top: cond -> beq end; body; step; b top; end:
+            if s.init is not None:
+                self.gen_stmt(s.init)
+            top_l = self.new_label("Lfor")
+            end_l = self.new_label("Lforend")
+            self.label(top_l)
+            if s.cond is not None:
+                self.gen_expr(s.cond)          # value in r0
+                self.emit("    cmp r0, #0")
+                self.emit(f"    beq {end_l}")
+            self.gen_stmt(s.body)
+            if s.step is not None:
+                self.gen_expr(s.step)          # result discarded
             self.emit(f"    b {top_l}")
             self.label(end_l)
 
