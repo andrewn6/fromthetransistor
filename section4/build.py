@@ -104,6 +104,8 @@ __modsi3:
     bx lr
 """
 
+BUILD_DIR = os.path.join(HERE, "build")
+
 def build(cfile, elffile):
     with open(cfile) as f:
         src = f.read()
@@ -124,18 +126,23 @@ def build(cfile, elffile):
     for (sec, off, rtype, sym, addend) in relocs:
         ld.add_relocation(off, sym, sec, type_=rtype, addend=addend)
     ld.link(entry="_start")
-    ld.write_elf(elffile)
-    print(f"built {elffile} ({os.path.getsize(elffile)} bytes)")
-    print(f"run: qemu-system-arm -M versatilepb -nographic -semihosting -kernel {elffile}")
+
+    # all outputs land in section4/build/ so the tree stays clean
+    os.makedirs(BUILD_DIR, exist_ok=True)
+    elfpath = os.path.join(BUILD_DIR, elffile)
+    ld.write_elf(elfpath)
+    print(f"built {elfpath} ({os.path.getsize(elfpath)} bytes)")
+    print(f"run: qemu-system-arm -M versatilepb -nographic -semihosting -kernel {elfpath}")
 
     # flat image for the verilator arm7_cpu (section3): .text + .data
     # concatenated, to be loaded at the linked base. the cpu testbench
     # takes the file and the base as its two arguments.
     flat = b"".join(bytes(s.content) for s in ld.sections)
-    binfile = elffile + ".bin"
+    binfile = os.path.join(BUILD_DIR, os.path.splitext(elffile)[0] + ".bin")
     with open(binfile, "wb") as f:
         f.write(flat)
     print(f"flat {binfile} ({len(flat)} bytes), load base {ld.sections[0].addr:#x}")
+    print(f"cpu: ../section3/obj_dir_cpu/cpu_sim {binfile} {ld.sections[0].addr:#x}")
 
 if __name__ == "__main__":
     if len(sys.argv) != 3:

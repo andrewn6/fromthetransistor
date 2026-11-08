@@ -1,3 +1,18 @@
-obj_dir/
+# toolchain build artifacts
+*.elf
+*.bin
+*.out
+a.out
+output.bin
+*.vcd
 
-build/
+# verilator build dirs
+obj_dir*/
+section2/blink_le/
+
+# python
+__pycache__/
+*.pyc
+
+# local workdirs
+.claude/

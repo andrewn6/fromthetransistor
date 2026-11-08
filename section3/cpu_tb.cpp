@@ -16,7 +16,8 @@
 //     -Mdir obj_dir_cpu -o cpu_sim
 //   make -C obj_dir_cpu -f Varm7_cpu.mk
 // run:
-//   ./obj_dir_cpu/cpu_sim ../section4/cputest.elf.bin 0x10084
+//   ./obj_dir_cpu/cpu_sim ../section4/build/cputest.bin 0x10054
+//   (build.py prints the exact cpu_sim line when it makes the .bin)
 #include <verilated.h>
 #include "Varm7_cpu.h"
 #include <cstdio>
