@@ -12,10 +12,6 @@ compound assignment (+= -= *= /= %=), x++/x--, structs (member access,
 const/unsigned/signed/long/short qualifiers, unsigned compares + division,
 varargs (printf), and a minimal preprocessor (#include "...", object-like
 #define). proven by build.py + test.c + vatest.c.
-
-known limits: 4 register args max (no stack args), no switch/casts/static/
-inline-asm, function-like macros and #if unsupported, whole-struct
-assignment and pass-by-value use pointers instead.
 """
 from __future__ import annotations
 import sys
@@ -273,12 +269,19 @@ def tokenize(src: str) -> list:
         if c.isspace():
             i += 1
             continue
-        # integer literal
+        # integer literal (decimal or 0x hex)
         if c.isdigit():
             j = i
-            while j < n and src[j].isdigit():
-                j += 1
-            toks.append(Tok(TINTL, int(src[i:j])))
+            if c == "0" and i + 1 < n and src[i + 1] in "xX" \
+                    and i + 2 < n and src[i + 2] in "0123456789abcdefABCDEF":
+                j = i + 2
+                while j < n and src[j] in "0123456789abcdefABCDEF":
+                    j += 1
+                toks.append(Tok(TINTL, int(src[i:j], 16)))
+            else:
+                while j < n and src[j].isdigit():
+                    j += 1
+                toks.append(Tok(TINTL, int(src[i:j])))
             i = j
             continue
         # char literal

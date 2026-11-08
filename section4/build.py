@@ -128,6 +128,15 @@ def build(cfile, elffile):
     print(f"built {elffile} ({os.path.getsize(elffile)} bytes)")
     print(f"run: qemu-system-arm -M versatilepb -nographic -semihosting -kernel {elffile}")
 
+    # flat image for the verilator arm7_cpu (section3): .text + .data
+    # concatenated, to be loaded at the linked base. the cpu testbench
+    # takes the file and the base as its two arguments.
+    flat = b"".join(bytes(s.content) for s in ld.sections)
+    binfile = elffile + ".bin"
+    with open(binfile, "wb") as f:
+        f.write(flat)
+    print(f"flat {binfile} ({len(flat)} bytes), load base {ld.sections[0].addr:#x}")
+
 if __name__ == "__main__":
     if len(sys.argv) != 3:
         print("usage: uv run python build.py input.c output.elf", file=sys.stderr)
