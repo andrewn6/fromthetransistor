@@ -75,6 +75,8 @@ class Asm:
         self.relocs = []        # (section, offset, type, symbol, addend)
         self.pool = []          # literal pool entries: raw int or symbol name
         self.pool_at = {}       # insn index -> pool entry index
+        self.chunks = []        # flushed pools: (text offset, first entry, count)
+        self.chunk_first = 0    # first entry of the pending (unflushed) pool
         self.cur = ".text"
         self.pending = []       # (section, offset, (mnemonic, cond, operands))
 
@@ -131,6 +133,15 @@ class Asm:
             sec += data
             if d == ".asciz":
                 sec.append(0)
+        elif d == ".pool":
+            # flush pending literals inline: reserve their space here so
+            # each entry stays within ldr range of the code that uses it
+            if self.cur == ".text":
+                n = len(self.pool) - self.chunk_first
+                base = self.size()
+                self.sections[".text"] += b"\x00" * (4 * n)
+                self.chunks.append((base, self.chunk_first, n))
+                self.chunk_first = len(self.pool)
         else:
             raise ValueError(f"asm: unknown directive {d}")
 
@@ -161,23 +172,29 @@ class Asm:
     # ----- pass 2 -----
 
     def pass2(self):
-        text = self.sections[".text"]
-        pool_base = len(text)
-        # literal pool lives at the end of .text
-        text += b"\x00" * (4 * len(self.pool))
+        # literals still pending (source had no trailing .pool) flush at the
+        # very end, matching the old single-pool behavior
+        if len(self.pool) > self.chunk_first:
+            n = len(self.pool) - self.chunk_first
+            base = len(self.sections[".text"])
+            self.sections[".text"] += b"\x00" * (4 * n)
+            self.chunks.append((base, self.chunk_first, n))
+            self.chunk_first = len(self.pool)
 
         for idx, (secname, off, (mnem, cond, ops)) in enumerate(self.pending):
-            word = self.encode(mnem, cond, ops, secname, off,
-                               pool_base if secname == ".text" else None, idx)
+            word = self.encode(mnem, cond, ops, secname, off, idx)
             struct.pack_into("<I", self.sections[secname], off, word)
 
-        # emit the pool itself
-        for i, val in enumerate(self.pool):
-            off = pool_base + 4 * i
-            try:
-                struct.pack_into("<I", text, off, int(val, 0) & 0xFFFFFFFF)
-            except ValueError:
-                self.relocs.append((".text", off, R_ARM_ABS32, val, 0))
+        # emit the pool chunks themselves into the space reserved in pass 1
+        for (base, first, n) in self.chunks:
+            for k in range(n):
+                off = base + 4 * k
+                val = self.pool[first + k]
+                try:
+                    struct.pack_into("<I", self.sections[".text"], off,
+                                     int(val, 0) & 0xFFFFFFFF)
+                except ValueError:
+                    self.relocs.append((".text", off, R_ARM_ABS32, val, 0))
 
     def sym_addr(self, name):
         if name not in self.symbols:
@@ -185,12 +202,19 @@ class Asm:
         sec, off = self.symbols[name]
         return BASE + (0 if sec == ".text" else len(self.sections[".text"])) + off
 
-    def encode(self, mnem, cond, ops, secname, at, pool_base, idx):
+    def encode(self, mnem, cond, ops, secname, at, idx):
         c = COND[cond]
 
         if mnem == "LDR=":
             rd = reg(ops)
-            entry = pool_base + 4 * self.pool_at[idx]
+            i = self.pool_at[idx]
+            # find the flushed pool chunk holding this entry
+            for (base, first, n) in self.chunks:
+                if first <= i < first + n:
+                    entry = base + 4 * (i - first)
+                    break
+            else:
+                raise ValueError("asm: literal not flushed into any pool")
             off12 = entry - (at + 8)               # pc reads as addr+8
             if not (0 <= off12 <= 4095):
                 raise ValueError("asm: literal pool out of ldr range")

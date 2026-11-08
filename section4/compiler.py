@@ -7,18 +7,17 @@ supported: int/char/void + pointers, arrays (char buf[512] locals and
 globals, decay to element pointer, string init), globals, string literals,
 full binary op set (div/mod via __divsi3/__modsi3), unary - ! * &, a[i],
 calls (max 4 args), if/else, while, for, break/continue, local decls,
-compound assignment (+= -= *= /= %=), x++/x--. proven by build.py + test.c.
+compound assignment (+= -= *= /= %=), x++/x--, structs (member access,
+->, nested types, c layout with alignment/padding), typedef, sizeof.
+proven by build.py + test.c.
 
 TODO: (needed by libc/bootloader/kernel/fat/tcp):
 
-1. struct: block_t (malloc), fat dir entries, tcp headers. member access,
-   nested types, layout/offsets.
-2. sizeof + typedef: size_t, block_t etc.
-3. unsigned / const: qualifiers parse-and-ignore first, unsigned semantics
+1. unsigned / const: qualifiers parse-and-ignore first, unsigned semantics
    last (int mostly fine).
-4. varargs: printf(char *fmt, ...) - or skip and keep fixed-arity
+2. varargs: printf(char *fmt, ...) - or skip and keep fixed-arity
    putstr-style wrappers in libc.
-5. #include / #define: or keep the build.py concat hack forever.
+3. #include / #define: or keep the build.py concat hack forever.
 """
 from __future__ import annotations
 import sys
@@ -42,6 +41,9 @@ class TArr(Type):
 @dataclass(frozen=True)
 class TPtr(Type):
     inner: Type
+@dataclass(frozen=True)
+class TStruct(Type):
+    tag: str
 
 # ---------- ast: operators ----------
 
@@ -86,6 +88,9 @@ class CompAssign(Expr):
 class PostIncDec(Expr):
     target: Expr 
     delta: int
+@dataclass 
+class Sizeof(Expr):
+    operand: object
 @dataclass
 class BinOp(Expr):
     op: str
@@ -103,6 +108,10 @@ class Call(Expr):
 class Index(Expr):      # a[i] == *(a + i)
     base: Expr
     idx: Expr
+@dataclass 
+class Member(Expr):
+    base: Expr 
+    name: str 
 @dataclass
 class Deref(Expr):      # *p
     operand: Expr
@@ -163,6 +172,12 @@ class Global:
     type: Type
     name: str
     init: Expr | None
+@dataclass 
+class StructDef:
+    tag: str
+@dataclass 
+class TypedefDef:
+    name: str 
 
 # ---------- lexer ----------
 
@@ -179,16 +194,16 @@ class Tok:
         return f"{self.kind}:{self.val!r}"
 
 # reserved words so identifiers do not capture them
-KEYWORDS = ["int", "char", "void", "if", "while", "return", "else", "for", "break", "continue"]
+KEYWORDS = ["int", "char", "void", "if", "while", "return", "else", "for", "break", "continue", "struct", "typedef", "sizeof"]
 
 # ordered so multi-char symbols match before single chars
 OPERATORS = [
     "==", "!=", "<=", ">=", "&&", "||",
-    "+=", "-=", "*=", "/=", "%=", "++", "--",
+    "+=", "-=", "*=", "/=", "%=", "++", "--", "->",
     "+", "-", "*", "/", "%", "<", ">", "=", "!", "&",
 ]
 
-PUNCT = "(){}[];,"
+PUNCT = "(){}[];,."
 
 def esc(c: str) -> str:
     # convert an escape code into the actual character
@@ -283,6 +298,7 @@ class Parser:
     def __init__(self, toks: list):
         self.toks = toks
         self.pos = 0
+        self.typedefs = {}
 
     def peek(self, k=0):
         i = self.pos + k
@@ -323,6 +339,18 @@ class Parser:
             base = TChar()
         elif t == Tok(TKW, "void"):
             base = TVoid()
+        elif t == Tok(TKW, "struct"):
+            self.pos += 1 
+            tag_tok = self.peek()
+            if tag_tok is None or tag_tok.kind != TID:
+                raise SyntaxError(f"parse: expected struct tag, got {self.preview()}")
+            self.pos += 1 
+            if self.peek() == Tok(TP, "{"):
+                STRUCTS[tag_tok.val] = self.parse_struct_members()
+            return self.parse_ptr(TStruct(tag_tok.val))
+        elif t is not None and t.kind == TID and t.val in self.typedefs:
+            self.pos += 1 
+            return self.parse_ptr(self.typedefs[t.val])
         else:
             raise SyntaxError(f"parse: expected type, got {self.preview()}")
         self.pos += 1
@@ -346,9 +374,44 @@ class Parser:
             t = TPtr(t)
         return t
 
+    def parse_struct_members(self) -> list:
+        # '{' type declarator [array suffix] ';')* '}'
+        self.expect(TP, "{")
+        members = []
+        while self.peek() != Tok(TP, "}"):
+            if self.at_end():
+                raise SyntaxError("parse: unterminated struct body, expected '}'")
+            ty = self.parse_type()
+            name_tok = self.peek()
+            if name_tok is None or name_tok.kind != TID:
+                raise SyntaxError(f"parse: expected member name, got {self.preview()}")
+            self.pos += 1 
+            ty = self.parse_array_suffix(ty)
+            self.expect(TP, ";")
+            members.append((name_tok.val, ty))
+        self.expect(TP, "}")
+        return members
+    
     def parse_top(self):
         # one top-level decl: function or global. both start type + name.
         # a '(' after the name means function.
+        if self.peek() == Tok(TKW, "struct") and self.peek(1) is not None \
+                and self.peek(1).kind == TID and self.peek(2) == Tok(TP, "{"):
+            ty = self.parse_type()
+            self.expect(TP, ";")
+            return StructDef(ty.tag)
+
+        if self.peek() == Tok(TKW, "typedef"):
+            self.pos += 1 
+            ty = self.parse_type()
+            name_tok = self.peek()
+            if name_tok is None or name_tok.kind != TID:
+                raise SyntaxError(f"parse: expected typedef name, got {self.preview()}")
+            self.pos += 1 
+            self.expect(TP, ";")
+            self.typedefs[name_tok.val] = ty 
+            return TypedefDef(name_tok.val)
+        
         ty = self.parse_type()
         name_tok = self.peek()
         if name_tok is None or name_tok.kind != TID:
@@ -400,8 +463,13 @@ class Parser:
     def is_type_start(self) -> bool:
         # true when the cursor sits on a type keyword starting a declaration
         t = self.peek()
-        return t == Tok(TKW, "int") or t == Tok(TKW, "char") or t == Tok(TKW, "void")
-
+        if t is None:
+            return False
+        if t == Tok(TKW, "int") or t == Tok(TKW, "char") \
+                or t == Tok(TKW, "void") or t == Tok(TKW, "struct"):
+            return True
+        return t.kind == TID and t.val in self.typedefs
+    
     def parse_block(self) -> Stmt:
         # '{' stmt* '}' into SBlock
         self.expect(TP, "{")
@@ -586,7 +654,26 @@ class Parser:
         if t == Tok(TO, "&"):
             self.pos += 1
             return AddrOf(self.parse_unary())
+        if t == Tok(TKW, "sizeof"):
+            self.pos += 1
+            if self.peek() == Tok(TP, "(") and self.type_after_lparen():
+                self.expect(TP, "(")
+                ty = self.parse_type()
+                self.expect(TP, ")")
+                return Sizeof(ty)
+            return Sizeof(self.parse_unary())
+        
         return self.parse_postfix()
+
+    def type_after_lparen(self) -> bool:
+        # true when token after '(' starts a type, so 'sizeof( is a 
+        # cast style type operand rather than a parathensized expression 
+        n = self.peek(1)
+        if n is None:
+            return False 
+        if n in (Tok(TKW, "int"), Tok(TKW, "char"), Tok(TKW, "void"), Tok(TKW, "struct")):
+            return True 
+        return n.kind == TID and n.val in self.typedefs
 
     def parse_postfix(self) -> Expr:
         # primary followed by zero or more call '(' args ')' or index '[' i ']'
@@ -611,6 +698,18 @@ class Parser:
             elif t == Tok(TO, "--"):
                 self.pos += 1 
                 e = PostIncDec(e, -1)
+            elif t == Tok(TP, "."):
+                self.pos += 1 
+                name_tok = self.next()
+                if name_tok is None or name_tok.kind != TID:
+                    raise SyntaxError(f"parse: expected member name after '.', got {self.preview()}")
+                e = Member(e, name_tok.val)
+            elif t == Tok(TO, "->"):
+                self.pos += 1
+                name_tok = self.next()
+                if name_tok is None or name_tok.kind != TID:
+                    raise SyntaxError(f"parse: expected member name after '->', got {self.preview()}")
+                e = Member(Deref(e), name_tok.val)
             else:
                 return e
 
@@ -655,6 +754,43 @@ class Parser:
 # Target is 32bit ARM, int, char and every pointer all occupy one 
 WORD = 4
 
+STRUCTS: dict = {}
+
+def align_of(t: Type) -> int:
+    if isinstance(t, TChar):
+        return 1 
+    if isinstance(t, (TInt, TPtr)):
+        return WORD 
+    if isinstance(t, TArr):
+        return align_of(t.elem)
+    if isinstance(t, TStruct):
+        return max((align_of(mt) for _, mt in STRUCTS[t.tag]), default=1)
+    raise TypeError(f"layout: unknown type {t}")
+
+def struct_layout(tag: str):
+    out = []
+    off = 0 
+    align = 1 
+    for (name, mt) in STRUCTS[tag]:
+        a = align_of(mt)
+        off = (off + a - 1) & ~(a- 1)
+        out.append((name, mt, off))
+        off += type_size(mt)
+        align = max(align, a)
+    return out, (off + align - 1) & ~(align - 1)
+
+def member_type(tag: str, name: str) -> Type:
+    for (n, mt) in STRUCTS[tag]:
+        if n == name:
+            return mt 
+    raise KeyError(f"layout: struct {tag!r} has no member {name!r}")
+
+def member_offset(tag: str, name: str) -> int:
+    # byte offset of one member within the struct
+    for (n, mt, off) in struct_layout(tag)[0]:
+        if n == name:
+            return off
+    raise KeyError(f"layout: struct {tag!r} has no member {name!r}")
 def type_size(t: Type) -> int:
     if isinstance(t, TChar):
         return 1 
@@ -662,6 +798,8 @@ def type_size(t: Type) -> int:
         return WORD 
     if isinstance(t, TArr):
         return t.count * type_size(t.elem)
+    if isinstance(t, TStruct):
+        return struct_layout(t.tag)[1]
     if isinstance(t, TVoid):
         raise TypeError("codegen: void has no size")
     raise TypeError(f"codegen: unknown type {t}")
@@ -750,8 +888,13 @@ def collect_strings(decls: list) -> dict:
                 visit_expr(a)
         elif isinstance(e, Index):
             visit_expr(e.base); visit_expr(e.idx)
+        elif isinstance(e, Member):
+            visit_expr(e.base)
         elif isinstance(e, (Deref, AddrOf)):
             visit_expr(e.operand)
+        elif isinstance(e, Sizeof):
+            if not isinstance(e.operand, Type):
+                visit_expr(e.operand)
 
     def visit_stmt(s):
         if isinstance(s, SExpr):
@@ -887,6 +1030,9 @@ class CodeGen:
         self.emit(".text")
         for fn in funcs:
             self.gen_func(fn)
+            # flush this function's literals into a nearby pool chunk so
+            # ldr = stays within its 4kb pc-relative range
+            self.emit(".pool")
             self.emit()
 
         return "\n".join(self.lines) + "\n"
@@ -1083,6 +1229,11 @@ class CodeGen:
         if isinstance(e, Index):
             t = self.infer_type(e.base)
             return t.inner if isinstance(t, TPtr) else TInt()
+        if isinstance(e, Member):
+            bt = self.infer_type(e.base)
+            if not isinstance(bt, TStruct):
+                raise TypeError(f"codegen: member access on non-struct {bt}")
+            return decay(member_type(bt.tag, e.name))
         if isinstance(e, Assign):
             return self.infer_type(e.target)
         if isinstance(e, CompAssign):
@@ -1109,6 +1260,8 @@ class CodeGen:
                 rt = self.infer_type(e.rhs)
                 if isinstance(rt, TPtr):
                     return rt
+            return TInt()
+        if isinstance(e, Sizeof):
             return TInt()
         raise NotImplementedError(f"infer_type: unknown expr {e}")
 
@@ -1146,6 +1299,20 @@ class CodeGen:
         elif isinstance(e, Index):
             # a[i] as lvalue: address = base + i * scale
             self.gen_lvalue_index(e)
+        elif isinstance(e, Member):
+            # address = address of the base struct + member offset.
+            # gen_lvalue(deref) yields the pointer value itself, so this
+            # one case covers b.m, p->m (parsed as (*p).m), a.b.c, arr[i].m
+            bt = self.infer_type(e.base)
+            if not isinstance(bt, TStruct):
+                raise TypeError(f"gen_lvalue: member access on non-struct {bt}")
+            self.gen_lvalue(e.base)
+            off = member_offset(bt.tag, e.name)
+            if 0 <= off <= 255:
+                self.emit(f"    add r0, r0, #{off}")
+            else:
+                self.emit(f"    ldr r1, ={off}")
+                self.emit("    add r0, r0, r1")
         else:
             raise NotImplementedError(f"gen_lvalue: not assignable: {e}")
 
@@ -1272,7 +1439,29 @@ class CodeGen:
             self.emit("    pop {r2}")                # r2 = address
             self.emit(f"    {self.store_insn(t)} r0, [r2]")
             self.emit("    mov r0, r1")              # result = old value
-            
+
+        elif isinstance(e, Sizeof):
+            # the operand is never evaluated, only its type matters.
+            # arrays keep their full size (no decay); pointers are a word.
+            if isinstance(e.operand, Type):
+                t = e.operand
+            elif isinstance(e.operand, Var):
+                t = self.declared_type(e.operand.name)
+                if t is None:
+                    t = TInt()
+            elif isinstance(e.operand, Member):
+                # raw member type: b.data stays char[512], not char*
+                bt = self.infer_type(e.operand.base)
+                if not isinstance(bt, TStruct):
+                    raise TypeError(f"codegen: member access on non-struct {bt}")
+                t = member_type(bt.tag, e.operand.name)
+            else:
+                t = self.infer_type(e.operand)
+            size = type_size(t)
+            if 0 <= size <= 255:
+                self.emit(f"    mov r0, #{size}")
+            else:
+                self.emit(f"    ldr r0, ={size}")
         elif isinstance(e, AddrOf):
             self.gen_lvalue(e.operand)
 
@@ -1285,6 +1474,15 @@ class CodeGen:
             t = self.infer_type(e)
             self.gen_lvalue_index(e)       # address in r0
             self.emit(f"    {self.load_insn(t)} r0, [r0]")
+
+        elif isinstance(e, Member):
+            # member address in r0; load it unless the member is an array,
+            # whose value is its address (decays like a plain array name)
+            bt = self.infer_type(e.base)
+            mt = member_type(bt.tag, e.name)
+            self.gen_lvalue(e)
+            if not isinstance(mt, TArr):
+                self.emit(f"    {self.load_insn(decay(mt))} r0, [r0]")
 
         elif isinstance(e, UnOp):
             self.gen_expr(e.operand)
@@ -1396,6 +1594,7 @@ class CodeGen:
         self.emit(f"    bl {e.name}")
 
 def compile_text(src: str) -> str:
+    STRUCTS.clear()
     toks = tokenize(src)
     ast = Parser(toks).parse_program()
     return CodeGen().gen_program(ast)

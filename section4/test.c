@@ -1,3 +1,10 @@
+struct point { int x; int y; };
+struct block_t { int size; char data[512]; };
+struct outer { char c; struct point p; struct point *pp; };
+
+typedef struct block_t blk_t;
+typedef int size_t;
+
 int fib(int n) {
   if (n < 2) {
     return n;
@@ -159,6 +166,63 @@ int main() {
   p += 2;
   x = *p++;
   itoa(x, s);
+  putstr(s);
+  putstr("\n");
+
+  // structs: member access via . -> and nested
+  struct point pt;
+  struct point *q;
+  struct outer o;
+  pt.x = 3;
+  pt.y = 4;
+  q = &pt;
+  q->x = q->x + 10;
+  itoa(q->x, s);
+  putstr(s);
+  putstr(" ");
+  itoa(pt.y, s);
+  putstr(s);
+  putstr("\n");
+
+  o.c = 1;
+  o.p.x = 5;
+  o.p.y = 6;
+  o.pp = q;
+  o.pp->y = 40;
+  itoa(o.p.x * 100 + o.p.y, s);
+  putstr(s);
+  putstr(" ");
+  itoa(pt.y, s);
+  putstr(s);
+  putstr("\n");
+
+  // struct array member: blk.data[0..1] = 'h','i'
+  struct block_t blk;
+  blk.size = 7;
+  blk.data[0] = 'h';
+  blk.data[1] = 'i';
+  blk.data[2] = 0;
+  itoa(blk.size, s);
+  putstr(s);
+  putstr(" ");
+  putstr(blk.data);
+  putstr("\n");
+
+  // typedef + sizeof: 4 + 1 + 4 + 512 + 516 + 4 = 1041
+  blk_t tb;
+  blk_t *tbp;
+  size_t n;
+  tbp = &tb;
+  n = sizeof(int);
+  n = n + sizeof(char);
+  n = n + sizeof(int *);
+  n = n + sizeof tb.data;
+  n = n + sizeof *tbp;
+  n = n + sizeof(tbp->size);
+  itoa(n, s);
+  putstr(s);
+  putstr("\n");
+  itoa(sizeof(blk_t), s);
   putstr(s);
   putstr("\n");
 
