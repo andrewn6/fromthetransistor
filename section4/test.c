@@ -226,5 +226,25 @@ int main() {
   putstr(s);
   putstr("\n");
 
+  // unsigned: div/mod, unsigned compare, const parses fine
+  unsigned int ua = 12;
+  unsigned int ub = 3;
+  int r = 0;
+  ua = ua / ub;                  // 4
+  ua = ua % ub;                  // 1
+  if (ua > 0) {
+    r = r + 1;                   // unsigned compare true
+  }
+  const int ci = 2;
+  r = r + ci;                    // 3
+  ua = 3000000000;
+  if (ua > 100) {
+    r = r + 10;                  // needs unsigned compare (signed sees < 0)
+  }
+  ua = ua / 1000000000;          // unsigned div: 3
+  itoa(r * 10 + ua, s);          // r = 13 -> 133
+  putstr(s);
+  putstr("\n");
+
   return 0;
 }

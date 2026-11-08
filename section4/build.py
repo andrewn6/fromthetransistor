@@ -27,6 +27,16 @@ putstr:
     svc 0x123456
     bx lr
 
+@ int putchar(int c) - semihosting SYS_WRITEC (r1 = pointer to the char)
+putchar:
+    sub sp, sp, #4
+    strb r0, [sp]
+    mov r1, sp
+    mov r0, #3
+    svc 0x123456
+    add sp, sp, #4
+    bx lr
+
 @ unsigned divide: r0 = r0 / r1, remainder -> r2
 __udivsi3:
     mov r2, #0
@@ -37,7 +47,10 @@ __udivsi3:
 .Ludshift:
     cmp r1, r0
     bhi .Ludsub
-    lsl r1, r1, #1
+    lsl r5, r1, #1      @ next doubled divisor
+    cmp r5, r1
+    blo .Ludsub         @ wrapped past 2^32: stop before shifting
+    mov r1, r5
     lsl r4, r4, #1
     b .Ludshift
 .Ludsub:
@@ -94,7 +107,7 @@ __modsi3:
 def build(cfile, elffile):
     with open(cfile) as f:
         src = f.read()
-    asm_text = compiler.compile_text(src)
+    asm_text = compiler.compile_text(src, cfile)
     full = RUNTIME + "\n" + asm_text
 
     a = assembler.Asm()

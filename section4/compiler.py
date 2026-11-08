@@ -5,23 +5,23 @@ Source text -> Tokenized -> Parsed -> Codegen -> ARM assembly text
 
 supported: int/char/void + pointers, arrays (char buf[512] locals and
 globals, decay to element pointer, string init), globals, string literals,
-full binary op set (div/mod via __divsi3/__modsi3), unary - ! * &, a[i],
-calls (max 4 args), if/else, while, for, break/continue, local decls,
+full binary op set (div/mod via __divsi3/__modsi3/__udivsi3), unary - ! * &,
+a[i], calls (max 4 args), if/else, while, for, break/continue, local decls,
 compound assignment (+= -= *= /= %=), x++/x--, structs (member access,
-->, nested types, c layout with alignment/padding), typedef, sizeof.
-proven by build.py + test.c.
+->, nested types, c layout with alignment/padding), typedef, sizeof,
+const/unsigned/signed/long/short qualifiers, unsigned compares + division,
+varargs (printf), and a minimal preprocessor (#include "...", object-like
+#define). proven by build.py + test.c + vatest.c.
 
-TODO: (needed by libc/bootloader/kernel/fat/tcp):
-
-1. unsigned / const: qualifiers parse-and-ignore first, unsigned semantics
-   last (int mostly fine).
-2. varargs: printf(char *fmt, ...) - or skip and keep fixed-arity
-   putstr-style wrappers in libc.
-3. #include / #define: or keep the build.py concat hack forever.
+known limits: 4 register args max (no stack args), no switch/casts/static/
+inline-asm, function-like macros and #if unsupported, whole-struct
+assignment and pass-by-value use pointers instead.
 """
 from __future__ import annotations
 import sys
 from dataclasses import dataclass, field
+import os 
+import re 
 
 # ---------- ast: types ----------
 
@@ -93,6 +93,11 @@ class PostIncDec(Expr):
 @dataclass 
 class Sizeof(Expr):
     operand: object
+
+@dataclass
+class VaArg(Expr):
+    ty: Type
+
 @dataclass
 class BinOp(Expr):
     op: str
@@ -169,6 +174,7 @@ class Func:
     name: str
     params: list   # list of (Type, str)
     body: Stmt
+    varargs: bool = False
 @dataclass
 class Global:
     type: Type
@@ -210,6 +216,38 @@ PUNCT = "(){}[];,."
 def esc(c: str) -> str:
     # convert an escape code into the actual character
     return {"n": "\n", "t": "\t", "0": "\0", "\\": "\\", "'": "'", '"': '"'}.get(c, c)
+
+DEFINES: dict = {}
+
+def preprocess(src: str, path: str = ".") -> str:
+    out = []
+    for line in src.splitlines():
+        s = line.strip()
+        if s.startswith("#include"):
+            fn = s[len("#include"):].strip()
+            if not (fn.startswith('"') and fn.endswith('"')):
+                raise SyntaxError(f'preprocess: only #include "file" is supported: {s!r}')
+            fn = fn[1:-1]
+            base = os.path.dirname(os.path.abspath(path))
+            inc = os.path.join(base, fn)
+            with open(inc) as f:
+                out.append(preprocess(f.read(), inc))
+        elif s.startswith("#define"):
+            parts = s.split(None, 2)
+            if len(parts) < 2:
+                raise SyntaxError(f"preprocess: bad #define: {s!r}")
+            name = parts[1]
+            if "(" in name:
+                raise SyntaxError(f"preprocess: function-like macros not supported: {s!r}")
+            DEFINES[name] = parts[2] if len(parts) > 2 else ""
+        elif s.startswith("#"):
+            raise SyntaxError(f"preprocess: unsupported directive: {s!r}")
+        else:
+            out.append(line)
+    text = "\n".join(out)
+    for name, val in DEFINES.items():
+        text = re.sub(rf"\b{re.escape(name)}\b", val.replace("\\", "\\\\"), text)
+    return text
 
 def tokenize(src: str) -> list:
     # consume the input characters and return a token list
@@ -442,9 +480,9 @@ class Parser:
         self.pos += 1
         if self.peek() == Tok(TP, "("):
             self.pos += 1
-            params = self.parse_params()
+            params, varargs = self.parse_params()
             body = self.parse_block()
-            return Func(ty, name, params, body)
+            return Func(ty, name, params, body, varargs)
         return self.parse_global(ty, name)
 
     def parse_global(self, ty: Type, name: str):
@@ -458,16 +496,24 @@ class Parser:
         self.expect(TP, ";")
         return Global(ty, name, None)
 
-    def parse_params(self) -> list:
-        # comma separated params up to ')'
+    def parse_params(self):
+        # comma separated params up to ')'. a trailing '...' marks a
+        # varargs function; the anonymous args arrive in r{len(params)}..r3.
         if self.peek() == Tok(TP, ")"):
             self.pos += 1
-            return []
+            return [], False
         if self.peek() == Tok(TKW, "void") and self.peek(1) == Tok(TP, ")"):
             self.pos += 2
-            return []
+            return [], False
         params = []
         while True:
+            if self.peek() == Tok(TP, "."):
+                if self.peek(1) == Tok(TP, ".") and self.peek(2) == Tok(TP, "."):
+                    self.pos += 3 
+                    self.expect(TP, ")")
+                    return params, True 
+                raise SyntaxError(f"parse: bad parameter, got {self.preview()}")
+
             ty = self.parse_type()
             name_tok = self.peek()
             if name_tok is None or name_tok.kind != TID:
@@ -476,7 +522,7 @@ class Parser:
             self.pos += 1
             sep = self.next()
             if sep == Tok(TP, ")"):
-                return params
+                return params, False 
             if sep != Tok(TP, ","):
                 raise SyntaxError(f"parse: bad parameter, got {self.preview()}")
 
@@ -706,6 +752,15 @@ class Parser:
         e = self.parse_primary()
         while True:
             t = self.peek()
+
+            if isinstance(e, Var) and e.name == "va_arg" and t == Tok(TP, "("):
+                self.pos += 1
+                self.parse_expr()
+                self.expect(TP, ",")
+                ty = self.parse_type()
+                self.expect(TP, ")")
+                return VaArg(ty)
+            
             if t == Tok(TP, "("):
                 # a call only makes sense directly on a named function
                 if not isinstance(e, Var):
@@ -1089,6 +1144,10 @@ class CodeGen:
         for (ty, name) in fn.params:
             self.frame.declare(name, ty)
         collect_locals(self.frame, fn.body)
+        if fn.varargs:
+            self.frame.declare("__va", TInt())
+            for i in range(len(fn.params), 4):
+                self.frame.declare(f"__va{i - len(fn.params)}", TInt())
         frame_bytes = self.frame.frame_bytes()
 
         # a per-function epilogue label so 'return' anywhere can jump to the
@@ -1114,6 +1173,16 @@ class CodeGen:
             else:
                 raise NotImplementedError(
                     "codegen: more than 4 params (stack args) not yet supported")
+
+        if fn.varargs:
+            # stash the anonymous args after the named ones and reset the
+            # fetch index
+            for i in range(len(fn.params), 4):
+                off = self.frame.offset(f"__va{i - len(fn.params)}")
+                self.emit(f"    str r{i}, [fp, #{off}]")
+            off = self.frame.offset("__va")
+            self.emit("    mov r0, #0")
+            self.emit(f"    str r0, [fp, #{off}]")
 
         # reserve locals. imm only encodes 0-255, big frames go via a register.
         if frame_bytes:
@@ -1292,6 +1361,8 @@ class CodeGen:
             return TPtr(self.infer_type(e.operand))
         if isinstance(e, UnOp):
             return TInt()          # !x and -x are ints
+        if isinstance(e, VaArg):
+            return decay(e.ty)
         if isinstance(e, Call):
             return TInt()          # we do not track return types
         if isinstance(e, BinOp):
@@ -1517,6 +1588,28 @@ class CodeGen:
                 self.emit(f"    mov r0, #{size}")
             else:
                 self.emit(f"    ldr r0, ={size}")
+
+        elif isinstance(e, VaArg):
+            # runtime fetch: __va indexes the consecutive __va0.. slots,
+            # slot i at offset(__va0) - 4*i, so va_arg inside loops works.
+            # varargs are word-promoted, so always a full load.
+            if self.frame is None or not self.frame.has("__va0"):
+                raise TypeError("codegen: va_arg outside a varargs function")
+            base = self.frame.offset("__va0")
+            vaidx = self.frame.offset("__va")
+            self.emit(f"    ldr r1, [fp, #{vaidx}]")   # i = __va
+            self.emit("    mov r2, r1")
+            self.emit("    add r1, r1, #1")
+            self.emit(f"    str r1, [fp, #{vaidx}]")   # __va = i + 1
+            self.emit("    lsl r2, r2, #2")            # 4*i
+            if abs(base) <= 255:
+                self.emit(f"    add r0, fp, #{base}")  # fp + base
+            else:
+                self.emit(f"    ldr r0, ={base}")
+                self.emit("    add r0, fp, r0")
+            self.emit("    sub r0, r0, r2")            # &slot = fp + base - 4*i
+            self.emit("    ldr r0, [r0]")              # value in r0
+
         elif isinstance(e, AddrOf):
             self.gen_lvalue(e.operand)
 
@@ -1651,6 +1744,10 @@ class CodeGen:
             raise NotImplementedError(f"gen_binop: unknown op {op}")
 
     def gen_call(self, e: Call):
+        if e.name in ("va_start", "va_end"):
+            if self.frame is None or not self.frame.has("__va"):
+                raise TypeError(f"codegen: {e.name} outside a varargs function")
+            return
         if len(e.args) > 4:
             raise NotImplementedError(
                 "codegen: more than 4 call args (stack args) not yet supported")
@@ -1663,8 +1760,10 @@ class CodeGen:
             self.emit(f"    pop {{r{i}}}")
         self.emit(f"    bl {e.name}")
 
-def compile_text(src: str) -> str:
+def compile_text(src: str, path: str) -> str:
     STRUCTS.clear()
+    DEFINES.clear()
+    src = preprocess(src, path)
     toks = tokenize(src)
     ast = Parser(toks).parse_program()
     return CodeGen().gen_program(ast)
@@ -1675,7 +1774,7 @@ def main(argv):
         return 1
     with open(argv[1]) as f:
         src = f.read()
-    out = compile_text(src)
+    out = compile_text(src, argv[1])
     if "-o" in argv:
         dst = argv[argv.index("-o") + 1]
         with open(dst, "w") as f:
