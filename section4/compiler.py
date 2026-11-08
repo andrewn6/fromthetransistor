@@ -31,6 +31,8 @@ class Type: pass
 @dataclass(frozen=True)
 class TInt(Type): pass
 @dataclass(frozen=True)
+class TUInt(Type): pass
+@dataclass(frozen=True)
 class TChar(Type): pass
 @dataclass(frozen=True)
 class TVoid(Type): pass
@@ -194,7 +196,7 @@ class Tok:
         return f"{self.kind}:{self.val!r}"
 
 # reserved words so identifiers do not capture them
-KEYWORDS = ["int", "char", "void", "if", "while", "return", "else", "for", "break", "continue", "struct", "typedef", "sizeof"]
+KEYWORDS = ["int", "char", "void", "if", "while", "return", "else", "for", "break", "continue", "struct", "typedef", "sizeof", "const", "unsigned", "signed", "long", "short"]
 
 # ordered so multi-char symbols match before single chars
 OPERATORS = [
@@ -331,30 +333,50 @@ class Parser:
         return decls
 
     def parse_type(self) -> Type:
+
+        unsigned = False 
+        while True:
+            t = self.peek()
+            if t == Tok(TKW, "const"):
+                self.pos += 1 
+            elif t == Tok(TKW, "unsigned"):
+                unsigned = True 
+                self.pos += 1
+            elif t in (Tok(TKW, "signed"), Tok(TKW, "long"), Tok(TKW, "short")):
+                self.pos += 1
+            else:
+                break
+
         t = self.peek()
-        base = None
         if t == Tok(TKW, "int"):
-            base = TInt()
+            self.pos += 1
+            base = TUInt() if unsigned else TInt()
         elif t == Tok(TKW, "char"):
-            base = TChar()
+            self.pos += 1
+            base = TChar()          # loads zero-extend, so char == unsigned char
         elif t == Tok(TKW, "void"):
+            self.pos += 1
             base = TVoid()
         elif t == Tok(TKW, "struct"):
-            self.pos += 1 
+            self.pos += 1
             tag_tok = self.peek()
             if tag_tok is None or tag_tok.kind != TID:
                 raise SyntaxError(f"parse: expected struct tag, got {self.preview()}")
-            self.pos += 1 
+            self.pos += 1
             if self.peek() == Tok(TP, "{"):
+                # definition: 'struct tag { members }', registers the layout
                 STRUCTS[tag_tok.val] = self.parse_struct_members()
             return self.parse_ptr(TStruct(tag_tok.val))
         elif t is not None and t.kind == TID and t.val in self.typedefs:
-            self.pos += 1 
+            # a typedef name: resolve to its aliased type
+            self.pos += 1
             return self.parse_ptr(self.typedefs[t.val])
+        elif unsigned and t is not None and t.kind == TID:
+            base = TUInt()          # bare 'unsigned x' == 'unsigned int x'
         else:
             raise SyntaxError(f"parse: expected type, got {self.preview()}")
-        self.pos += 1
         return self.parse_ptr(base)
+
     
     def parse_array_suffix(self, t: Type) -> Type:
         if self.peek() == Tok(TP, "["):
@@ -461,12 +483,14 @@ class Parser:
     # ----- statements -----
 
     def is_type_start(self) -> bool:
-        # true when the cursor sits on a type keyword starting a declaration
+        # true when the cursor sits on a type keyword or typedef name
         t = self.peek()
         if t is None:
             return False
         if t == Tok(TKW, "int") or t == Tok(TKW, "char") \
-                or t == Tok(TKW, "void") or t == Tok(TKW, "struct"):
+                or t == Tok(TKW, "void") or t == Tok(TKW, "struct") \
+                or t in (Tok(TKW, "const"), Tok(TKW, "unsigned"),
+                         Tok(TKW, "signed"), Tok(TKW, "long"), Tok(TKW, "short")):
             return True
         return t.kind == TID and t.val in self.typedefs
     
@@ -666,13 +690,15 @@ class Parser:
         return self.parse_postfix()
 
     def type_after_lparen(self) -> bool:
-        # true when token after '(' starts a type, so 'sizeof( is a 
-        # cast style type operand rather than a parathensized expression 
+        # true when the token after '(' starts a type, so 'sizeof(' is a
+        # cast-style type operand rather than a parenthesized expression
         n = self.peek(1)
         if n is None:
-            return False 
-        if n in (Tok(TKW, "int"), Tok(TKW, "char"), Tok(TKW, "void"), Tok(TKW, "struct")):
-            return True 
+            return False
+        if n in (Tok(TKW, "int"), Tok(TKW, "char"), Tok(TKW, "void"), Tok(TKW, "struct")) \
+                or n in (Tok(TKW, "const"), Tok(TKW, "unsigned"), Tok(TKW, "signed"),
+                         Tok(TKW, "long"), Tok(TKW, "short")):
+            return True
         return n.kind == TID and n.val in self.typedefs
 
     def parse_postfix(self) -> Expr:
@@ -758,9 +784,9 @@ STRUCTS: dict = {}
 
 def align_of(t: Type) -> int:
     if isinstance(t, TChar):
-        return 1 
-    if isinstance(t, (TInt, TPtr)):
-        return WORD 
+        return 1
+    if isinstance(t, (TInt, TUInt, TPtr)):
+        return WORD
     if isinstance(t, TArr):
         return align_of(t.elem)
     if isinstance(t, TStruct):
@@ -793,9 +819,9 @@ def member_offset(tag: str, name: str) -> int:
     raise KeyError(f"layout: struct {tag!r} has no member {name!r}")
 def type_size(t: Type) -> int:
     if isinstance(t, TChar):
-        return 1 
-    if isinstance(t, (TInt, TPtr)):
-        return WORD 
+        return 1
+    if isinstance(t, (TInt, TUInt, TPtr)):
+        return WORD
     if isinstance(t, TArr):
         return t.count * type_size(t.elem)
     if isinstance(t, TStruct):
@@ -964,12 +990,29 @@ class CodeGen:
         self.label_count = 0
         self.frame = None        # current function's Frame (set in gen_func)
         self.epilogue = None     # current function's epilogue label (for return)
-        self.loops = [] # stack of. (break_target, continue_target)
-
+        self.loops = []         # stack of (break_target, continue_target)
+        self.pool_need = None   # line index of the earliest unflushed ldr =
 
     def emit(self, line: str = ""):
         # append one line of assembly. blank line for spacing when empty.
         self.lines.append(line)
+        if line == ".pool":
+            # a function boundary just flushed all pending literals
+            self.pool_need = None
+            return
+        if line.startswith("    ldr ") and ", =" in line and self.pool_need is None:
+            # first literal since the last pool flush
+            self.pool_need = len(self.lines)
+        # if that literal is drifting beyond ldr's 4kb pc-relative range,
+        # drop a pool right here and jump over it: the data is never
+        # executed, and no existing label sits between the two instructions
+        # surrounding the flush.
+        if self.pool_need is not None and len(self.lines) - self.pool_need > 600:
+            lbl = self.new_label("Lp")
+            self.lines.append(f"    b {lbl}")
+            self.lines.append(".pool")
+            self.lines.append(f"{lbl}:")
+            self.pool_need = None
 
     def label(self, name: str):
         # emit a label definition 'name:' at column 0
@@ -1260,6 +1303,12 @@ class CodeGen:
                 rt = self.infer_type(e.rhs)
                 if isinstance(rt, TPtr):
                     return rt
+            # unsigned arithmetic stays unsigned, so chained compares and
+            # divides keep the right flavor
+            if e.op in (ADD, SUB, MUL, DIV, MOD):
+                if isinstance(self.infer_type(e.lhs), TUInt) \
+                        or isinstance(self.infer_type(e.rhs), TUInt):
+                    return TUInt()
             return TInt()
         if isinstance(e, Sizeof):
             return TInt()
@@ -1408,11 +1457,17 @@ class CodeGen:
             elif e.op == MUL:
                 self.emit("    mul r0, r1, r0")
             elif e.op in (DIV, MOD):
-                # no divide in our arm subset: __divsi3(r0=num, r1=den)
+                # no divide in our arm subset; unsigned targets use
+                # __udivsi3 (quotient r0, remainder r2)
                 self.emit("    mov r2, r0")          # save rhs
                 self.emit("    mov r0, r1")          # r0 = old value
                 self.emit("    mov r1, r2")          # r1 = rhs
-                self.emit(f"    bl {'__divsi3' if e.op == DIV else '__modsi3'}")
+                if isinstance(t, TUInt):
+                    self.emit("    bl __udivsi3")
+                    if e.op == MOD:
+                        self.emit("    mov r0, r2")
+                else:
+                    self.emit(f"    bl {'__divsi3' if e.op == DIV else '__modsi3'}")
             else:
                 raise NotImplementedError(f"gen_expr: unknown compound op {e.op}")
             self.emit("    pop {r1}")                # r1 = address
@@ -1563,17 +1618,32 @@ class CodeGen:
         elif op == MUL:
             self.emit("    mul r0, r1, r0")
         elif op in (DIV, MOD):
-            # no divide in our arm subset: call a runtime helper
-            # __divsi3(r0 = numerator, r1 = denominator) -> r0
+            # no divide in our arm subset: call a runtime helper.
+            # __udivsi3 returns quotient in r0 and remainder in r2, so it
+            # covers both unsigned div and mod.
+            uns = isinstance(self.infer_type(e.lhs), (TUInt, TPtr)) \
+                or isinstance(self.infer_type(e.rhs), (TUInt, TPtr))
             self.emit("    mov r2, r0")    # save rhs
             self.emit("    mov r0, r1")    # r0 = lhs
             self.emit("    mov r1, r2")    # r1 = rhs
-            self.emit(f"    bl {'__divsi3' if op == DIV else '__modsi3'}")
+            if uns:
+                self.emit("    bl __udivsi3")
+                if op == MOD:
+                    self.emit("    mov r0, r2")
+            else:
+                self.emit(f"    bl {'__divsi3' if op == DIV else '__modsi3'}")
         elif op in (EQ, NE, LT, LE, GT, GE):
             # cmp sets flags from lhs - rhs, then materialize 0/1 with
-            # conditional movs. r1 = lhs, r0 = rhs.
-            cond = {EQ: "eq", NE: "ne", LT: "lt",
-                    LE: "le", GT: "gt", GE: "ge"}[op]
+            # conditional movs. r1 = lhs, r0 = rhs. unsigned operands (or
+            # pointers) compare with lo/ls/hi/hs instead of lt/le/gt/ge.
+            uns = isinstance(self.infer_type(e.lhs), (TUInt, TPtr)) \
+                or isinstance(self.infer_type(e.rhs), (TUInt, TPtr))
+            if uns:
+                cond = {EQ: "eq", NE: "ne", LT: "lo",
+                        LE: "ls", GT: "hi", GE: "hs"}[op]
+            else:
+                cond = {EQ: "eq", NE: "ne", LT: "lt",
+                        LE: "le", GT: "gt", GE: "ge"}[op]
             self.emit("    cmp r1, r0")
             self.emit("    mov r0, #0")
             self.emit(f"    mov{cond} r0, #1")
