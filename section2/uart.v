@@ -29,20 +29,6 @@ module uart (
     reg [2:0] tx_bit_counter;
     reg [7:0] rx_shift_reg, tx_shift_reg;
 
-    always @(posedge clk or posedge reset) begin
-      if (reset) begin 
-          baud_counter <= 0;
-      end else begin
-        /* verilator lint_off WIDTHEXPAND */
-        if (baud_counter >= BAUD_DIV - 1'b1) begin 
-        /* verilator lint_off WIDTHEXPAND */
-            baud_counter <= 0; 
-        end else begin 
-            baud_counter <= baud_counter + 1;
-        end 
-      end 
-    end
-
 
     always @(posedge clk or posedge reset) begin 
         if (reset) begin 
