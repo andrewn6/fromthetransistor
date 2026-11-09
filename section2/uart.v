@@ -23,7 +23,7 @@ module uart (
     } state_t;
 
     state_t rx_state, tx_state;
-    reg [15:0] baud_counter;
+    reg [15:0] tx_baud_counter;
     reg [15:0] rx_baud_counter;
     reg [2:0] rx_bit_counter;
     reg [2:0] tx_bit_counter;
@@ -57,7 +57,7 @@ module uart (
             rx_ready <= 0;
             if (rx_state == IDLE) begin 
                 if (~rx) begin rx_state <= START; rx_baud_counter <= 16'(BAUD_DIV / 2); end 
-            end else if (rx_baud_counter == BAUD_DIV - 1) begin 
+            end else if (rx_baud_counter == 16'(BAUD_DIV - 1)) begin 
                 rx_baud_counter <= 0;
                 case (rx_state)
                     START: if (~rx) begin rx_state <= DATA; rx_bit_counter <= 0; end else rx_state <= IDLE;
@@ -82,23 +82,30 @@ module uart (
             tx_bit_counter <= 0;
             tx_shift_reg <= 0;
             tx <= 1'b1;
-        end else if (baud_counter == 0) begin 
-            case (tx_state) 
-                IDLE: if (wr_en) begin tx_state <= START; tx_shift_reg <= data_in; tx_ready <= 0; tx <= 1'b0; end
-                START: begin tx_state <= DATA; tx_bit_counter <= 0; tx <= tx_shift_reg[0]; end
-                DATA: begin
-                    if (tx_bit_counter == 3'd7) begin 
-                        tx_state <= STOP;
-                        tx <= 1'b1;
-                    end else begin
-                        tx_bit_counter <= tx_bit_counter + 1;
-                        tx <= tx_shift_reg[tx_bit_counter + 1];
-                    end
+            tx_baud_counter <= 0;
+        end else begin 
+            if (tx_state == IDLE) begin 
+                if (wr_en) begin tx_state <= START; tx_shift_reg <= data_in; tx_ready <= 0; tx <= 1'b0; tx_baud_counter <= 0;
                 end 
-                STOP: begin tx_state <= IDLE; tx_ready <= 1; end
-                default: tx_state <= IDLE;
-            endcase
-        end 
-    end 
-
+            end else if (tx_baud_counter == 16'(BAUD_DIV - 1)) begin 
+                tx_baud_counter <= 0;
+                case (tx_state)
+                    START: begin tx_state <= DATA; tx_bit_counter <= 0; tx <= tx_shift_reg[0]; end 
+                    DATA: begin 
+                        if (tx_bit_counter == 3'd7) begin 
+                            tx_state <= STOP;
+                            tx <= 1'b1;
+                        end else begin 
+                            tx_bit_counter <= tx_bit_counter + 1;
+                            tx <= tx_shift_reg[tx_bit_counter + 1];
+                        end 
+                    end 
+                    STOP: begin tx_state <= IDLE; tx_ready <= 1; end 
+                    default: tx_state <= IDLE;
+                endcase 
+            end else begin 
+                tx_baud_counter <= tx_baud_counter + 1;
+            end
+        end
+    end
 endmodule
