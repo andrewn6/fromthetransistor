@@ -45,16 +45,23 @@ class TStruct(Type):
 
 # ---------- ast: operators ----------
 
-# binary operators our parser understands
-ADD, SUB, MUL, DIV, MOD = "add", "sub", "mul", "div", "mod"
-EQ, NE, LT, LE, GT, GE = "eq", "ne", "lt", "le", "gt", "ge"
-AND, OR = "and", "or"
+## operator constants
+BINOPS = (
+    "add", "sub", "mul", "div", "mod", # arithmetic 
+    "eq", "ne", "lt", "le", "gt", "ge",
+    "and", "or",
+    "band", "bor", "bxor",
+    "shl", "shr",
+)
+ADD, SUB, MUL, DIV, MOD, EQ, NE, LT, LE, GT, GE, AND, OR, \
+    BAND, BOR, BXOR, SHL, SHR = BINOPS
 
-# unary operators such as negate and logical not
-NEG, NOT = "neg", "not"
+UNOPS = ("neg", "not", "bnot")
+NEG, NOT, BNOT = UNOPS
 
 # compound assignment token -> the underlying binary op
-COMPOUND = {"+=": ADD, "-=": SUB, "*=": MUL, "/=": DIV, "%=": MOD}
+COMPOUND = {"+=": ADD, "-=": SUB, "*=": MUL, "/=": DIV, "%=": MOD,
+            "|=": BOR, "&=": BAND, "^=": BXOR, "<<=": SHL, ">>=": SHR}
 
 # ---------- ast: expressions ----------
 
@@ -203,8 +210,10 @@ KEYWORDS = ["int", "char", "void", "if", "while", "return", "else", "for", "brea
 # ordered so multi-char symbols match before single chars
 OPERATORS = [
     "==", "!=", "<=", ">=", "&&", "||",
-    "+=", "-=", "*=", "/=", "%=", "++", "--", "->",
-    "+", "-", "*", "/", "%", "<", ">", "=", "!", "&",
+    "<<=", ">>=",
+    "+=", "-=", "*=", "/=", "%=", "|=", "&=", "^=", "++", "--", "->",
+    "<<", ">>",
+    "+", "-", "*", "/", "%", "<", ">", "=", "!", "&", "|", "^", "~",
 ]
 
 PUNCT = "(){}[];,."
@@ -694,17 +703,30 @@ class Parser:
             else:
                 return lhs
 
+    def parse_logic_and(self) -> Expr:
+        return self.parse_binop({"&&": AND}, self.parse_bit_or)
+
+    def parse_bit_or(self) -> Expr:
+        # '|' is the loosest of the bitwise family
+        return self.parse_binop({"|": BOR}, self.parse_bit_xor)
+
+    def parse_bit_xor(self) -> Expr:
+        return self.parse_binop({"^": BXOR}, self.parse_bit_and)
+
+    def parse_bit_and(self) -> Expr:
+        return self.parse_binop({"&": BAND}, self.parse_equality)
+    
+    def parse_relational(self) -> Expr:
+        return self.parse_binop({"<": LT, "<=": LE, ">": GT, ">=": GE}, self.parse_shift)
+
+    def parse_shift(self) -> Expr:
+        return self.parse_binop({"<<": SHL, ">>": SHR}, self.parse_additive)
+    
     def parse_logic_or(self) -> Expr:
         return self.parse_binop({"||": OR}, self.parse_logic_and)
 
-    def parse_logic_and(self) -> Expr:
-        return self.parse_binop({"&&": AND}, self.parse_equality)
-
     def parse_equality(self) -> Expr:
         return self.parse_binop({"==": EQ, "!=": NE}, self.parse_relational)
-
-    def parse_relational(self) -> Expr:
-        return self.parse_binop({"<": LT, "<=": LE, ">": GT, ">=": GE}, self.parse_additive)
 
     def parse_additive(self) -> Expr:
         return self.parse_binop({"+": ADD, "-": SUB}, self.parse_term)
@@ -718,6 +740,9 @@ class Parser:
         if t == Tok(TO, "-"):
             self.pos += 1
             return UnOp(NEG, self.parse_unary())
+        if t == Tok(TO, "~"):
+            self.pos += 1 
+            return UnOp(BNOT, self.parse_unary())
         if t == Tok(TO, "!"):
             self.pos += 1
             return UnOp(NOT, self.parse_unary())
@@ -1379,7 +1404,7 @@ class CodeGen:
                     return rt
             # unsigned arithmetic stays unsigned, so chained compares and
             # divides keep the right flavor
-            if e.op in (ADD, SUB, MUL, DIV, MOD):
+            if e.op in (ADD, SUB, MUL, DIV, MOD, BAND, BOR, BXOR, SHL, SHR):
                 if isinstance(self.infer_type(e.lhs), TUInt) \
                         or isinstance(self.infer_type(e.rhs), TUInt):
                     return TUInt()
@@ -1530,6 +1555,22 @@ class CodeGen:
                 self.emit("    sub r0, r1, r0")
             elif e.op == MUL:
                 self.emit("    mul r0, r1, r0")
+            elif e.op in (BAND, BOR, BXOR):
+                insn = {BAND: "and", BOR: "orr", BXOR: "eor"}[e.op]
+                self.emit(f"    {insn} r0, r1, r0")
+            elif e.op in (SHL, SHR):
+                signed = not isinstance(t, (TUInt, TPtr))
+                if isinstance(e.value, IntLit):
+                    n = e.value.val & 31
+                    base = "lsl" if e.op == SHL else ("asr" if signed else "lsr")
+                    self.emit(f"    {base} r0, r1, #{n}")
+                else:
+                    if e.op == SHL:
+                        self.emit("    lsl r0, r1, r0")
+                    elif signed:
+                        self.emit("    asr r0, r1, r0")
+                    else:
+                        self.emit("    lsr r0, r1, r0")
             elif e.op in (DIV, MOD):
                 # no divide in our arm subset; unsigned targets use
                 # __udivsi3 (quotient r0, remainder r2)
@@ -1640,6 +1681,9 @@ class CodeGen:
             if e.op == NEG:
                 # rsb = reverse subtract: r0 = 0 - r0
                 self.emit("    rsb r0, r0, #0")
+            elif e.op == BNOT:
+                # ~x -> r0 = ~r0
+                self.emit("    mvn r0, r0")
             elif e.op == NOT:
                 # !x -> r0 = (x == 0)
                 self.emit("    cmp r0, #0")
@@ -1713,6 +1757,25 @@ class CodeGen:
             self.emit("    sub r0, r1, r0")
         elif op == MUL:
             self.emit("    mul r0, r1, r0")
+        elif op in (BAND, BOR, BXOR):
+            # r1 = lhs, r0 = rhs, one alu op
+            insn = {BAND: "and", BOR: "orr", BXOR: "eor"}[op]
+            self.emit(f"    {insn} r0, r1, r0")
+        elif op in (SHL, SHR):
+            # constant counts encode as imm shifts; variable counts use the
+            # register-shift form. >> is arithmetic for signed lhs.
+            signed = not isinstance(self.infer_type(e.lhs), (TUInt, TPtr))
+            if isinstance(e.rhs, IntLit):
+                n = e.rhs.val & 31
+                base = "lsl" if op == SHL else ("asr" if signed else "lsr")
+                self.emit(f"    {base} r0, r1, #{n}")
+            else:
+                if op == SHL:
+                    self.emit("    lsl r0, r1, r0")
+                elif signed:
+                    self.emit("    asr r0, r1, r0")
+                else:
+                    self.emit("    lsr r0, r1, r0")
         elif op in (DIV, MOD):
             # no divide in our arm subset: call a runtime helper.
             # __udivsi3 returns quotient in r0 and remainder in r2, so it

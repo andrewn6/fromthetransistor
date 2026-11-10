@@ -88,8 +88,11 @@ module arm7_cpu (
   end
 
   wire [3:0] rm = op2[3:0];
-  wire [4:0] sh_amt = op2[11:7];
+  wire       sh_reg = op2[4];                 // 1 = amount comes from a register
+  wire [3:0] rs_reg = op2[11:8];              // shift-amount register
+  wire [4:0] sh_amt = sh_reg ? regs[rs_reg][4:0] : op2[11:7];
   wire [1:0] sh_typ = op2[6:5];
+
 
   wire [31:0] rm_val = (rm == 4'hF) ? pc_read : regs[rm];
 
@@ -112,6 +115,12 @@ module arm7_cpu (
             end else begin
               op2_val = rm_val >> sh_amt;
               op2_cout = rm_val[sh_amt - 1];
+            end
+          end
+          2'b10: begin // asr
+            if (sh_amt != 5'd0) begin
+              op2_val = $signed(rm_val) >>> sh_amt;
+              op2_cout = rm_val[31];
             end
           end
           default: ;
@@ -233,7 +242,6 @@ module arm7_cpu (
 
   wire is_mul = is_dp && !i_bit && (instr[27:21] == 7'b0000000) &&
                 (instr[15:12] == 4'b0000) && (instr[7:4] == 4'b1001);
-  wire [3:0] rs_reg = op2[11:8];
   wire [31:0] rs_val = (rs_reg == 4'hF) ? pc_read : regs[rs_reg];
   wire [31:0] mul_rest = rm_val * rs_val; // low 32 bits
   wire [3:0] mul_rd = instr[19:16];

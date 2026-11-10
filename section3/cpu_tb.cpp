@@ -116,6 +116,8 @@ int main(int argc, char** argv) {
   // expected values from cputest.c
   static const uint32_t expected[] = {
     55, 5050, 3, 2, 3000, 34, 104105, 25, 218,
+    // bitwise + shifts
+    255, 240, 1024, 64, 4294967292, 8, 40, 65280, 4026531840,
   };
   int fails = 0;
   for (size_t i = 0; i < sizeof(expected) / 4; i++) {

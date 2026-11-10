@@ -265,15 +265,25 @@ class Asm:
             rd, rm, rs = [reg(x) for x in ops.split(",")]
             return (c << 28) | (rd << 16) | (rs << 8) | 0x90 | rm
 
-        if mnem in ("lsl", "lsr"):
-            # gas encodes 'lsl rd, rm, #n' as mov rd, rm, <shift>
-            rd, rm, imm = [x.strip() for x in ops.split(",")]
-            imm = int(imm.replace("#", ""), 0)
-            sh = 0 if mnem == "lsl" else 1          # lsl=00, lsr=01
-            if not (0 <= imm <= 31):
-                raise ValueError("asm: bad shift amount")
+        if mnem in ("lsl", "lsr", "asr"):
+            # both forms encode as mov rd, rm, <shift>:
+            #   'lsl rd, rm, #imm'  -> shift by imm5 (operand2 bit 4 = 0)
+            #   'lsl rd, rm, rs'    -> shift by register (bit 4 = 1)
+            parts = [x.strip() for x in ops.split(",")]
+            sh = {"lsl": 0, "lsr": 1, "asr": 2}[mnem]
+            if len(parts) != 3:
+                raise ValueError(f"asm: bad shift operands {ops!r}")
+            rd, rm, third = parts
+            if third.startswith("#"):
+                imm = int(third.replace("#", ""), 0)
+                if not (0 <= imm <= 31):
+                    raise ValueError("asm: bad shift amount")
+                return ((c << 28) | (DP_OPS["mov"] << 21) |
+                        (reg(rd) << 12) | (imm << 7) | (sh << 5) | reg(rm))
             return ((c << 28) | (DP_OPS["mov"] << 21) |
-                    (reg(rd) << 12) | (imm << 7) | (sh << 5) | reg(rm))
+                    (reg(rd) << 12) | (reg(third) << 8) |
+                    (sh << 5) | (1 << 4) | reg(rm))
+         
 
         # data processing: op rd, rn, operand2   (mov/cmp take one operand)
         o = mnem
