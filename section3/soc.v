@@ -59,7 +59,7 @@ module soc (
     );
 
     wire data_read = uart_sel && !cpu_we && uart_reg == 4'h0;
-    always (@posedge clk or posedge reset) begin 
+    always @(posedge clk or posedge reset) begin 
         if (reset) rx_valid <= 1'b0;
         else if (rx_pulse) rx_valid <= 1'b1;
         else if (data_read) rx_valid <= 1'b0;

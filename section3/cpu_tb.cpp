@@ -64,6 +64,7 @@ struct TxDecoder {
       if (!line) {
         busy = true;
         count = BAUD_DIV + BAUD_DIV / 2;
+        bit = 0;
         byte = 0;
       }
       return;
