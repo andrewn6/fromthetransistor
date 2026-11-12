@@ -20,7 +20,7 @@ fn status_color(s: Status) -> Color32 {
 
 pub fn show(ui: &mut egui::Ui, cpu: &CpuView) {
     widgets::heading(ui, "from the transistor to the web browser", theme::SOURCE);
-    widgets::caption(ui, "ORIGINAL_OUTLINE.md as a checklist. green parts run in this playground; blue parts exist as interfaces in toolchain/src/future.rs, wired where the real thing will plug in.");
+    widgets::caption(ui, "ORIGINAL_OUTLINE.md as a checklist. green parts run in this playground (the python toolchain itself, through pyodide); blue parts exist as interfaces in toolchain/src/future.rs, wired where the real thing will plug in.");
     ui.add_space(6.0);
     egui::ScrollArea::vertical().id_salt("roadmap").auto_shrink([false, false]).show(ui, |ui| {
         ui.columns(2, |cols| {

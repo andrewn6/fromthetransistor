@@ -2,10 +2,10 @@
 
 use crate::{highlight, theme, widgets};
 use eframe::egui::{self, RichText};
-use toolchain::pipeline::Build;
+use crate::snapshot::Snapshot;
 
-pub fn show(ui: &mut egui::Ui, b: &Build) {
-    let c = &b.compiled;
+pub fn show(ui: &mut egui::Ui, b: &Snapshot) {
+    let c = b;
     let Some(pre) = &c.preprocessed else {
         widgets::empty(ui, "nothing preprocessed: this is an assembly file, or preprocessing failed");
         return;

@@ -5,8 +5,7 @@
 use crate::{theme, widgets};
 use eframe::egui::{self, epaint::QuadraticBezierShape, Align2, Color32, CornerRadius, Pos2, Rect, RichText, Sense, Stroke, StrokeKind};
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use toolchain::linker::{ElfLinker, Patch, R_ARM_ABS32};
-use toolchain::pipeline::Build;
+use crate::snapshot::{func_at, Func, Link, Patch, Snapshot, R_ARM_ABS32};
 
 pub struct LinkView {
     hovered_patch: Option<usize>,
@@ -20,40 +19,14 @@ impl Default for LinkView {
     }
 }
 
-pub struct Func {
-    pub name: String,
-    pub start: u32,
-    pub end: u32,
-}
-
-// functions = global symbols in .text (local .L labels are jump targets)
-pub fn functions(ld: &ElfLinker) -> Vec<Func> {
-    let Some(text) = ld.sections.first() else { return vec![] };
-    let mut v: Vec<(String, u32)> = ld
-        .symbols
-        .iter()
-        .filter(|(n, s)| s.section == 0 && !n.starts_with(".L"))
-        .map(|(n, s)| (n.to_string(), s.value))
-        .collect();
-    v.sort_by_key(|(_, a)| *a);
-    let end = text.addr + text.size();
-    (0..v.len())
-        .map(|i| Func { name: v[i].0.clone(), start: v[i].1, end: v.get(i + 1).map_or(end, |n| n.1) })
-        .collect()
-}
-
-pub fn func_at(funcs: &[Func], addr: u32) -> Option<usize> {
-    funcs.iter().position(|f| f.start <= addr && addr < f.end)
-}
-
 impl LinkView {
     pub fn on_rebuild(&mut self) {
         self.scene = Rect::ZERO;
         self.hovered_patch = None;
     }
 
-    pub fn show(&mut self, ui: &mut egui::Ui, b: &Build) {
-        let Some(ld) = &b.linker else {
+    pub fn show(&mut self, ui: &mut egui::Ui, b: &Snapshot) {
+        let Some(ld) = &b.link else {
             widgets::empty(ui, "nothing linked yet: an earlier stage failed");
             return;
         };
@@ -65,7 +38,7 @@ impl LinkView {
              a branch offset.",
         );
         ui.add_space(4.0);
-        let funcs = functions(ld);
+        let funcs = b.functions();
 
         widgets::card(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -86,7 +59,7 @@ impl LinkView {
         });
     }
 
-    fn memory_map(&mut self, ui: &mut egui::Ui, ld: &ElfLinker, funcs: &[Func]) {
+    fn memory_map(&mut self, ui: &mut egui::Ui, ld: &Link, funcs: &[Func]) {
         let start = ld.load_addr;
         let end = ld.sections.iter().map(|s| s.addr + s.size()).max().unwrap_or(start + 1);
         let span = (end - start).max(1) as f32;
@@ -150,7 +123,7 @@ impl LinkView {
         });
     }
 
-    fn call_graph(&mut self, ui: &mut egui::Ui, ld: &ElfLinker, funcs: &[Func]) {
+    fn call_graph(&mut self, ui: &mut egui::Ui, ld: &Link, funcs: &[Func]) {
         let names: HashMap<u32, usize> = funcs.iter().enumerate().map(|(i, f)| (f.start, i)).collect();
         let mut edges: BTreeMap<(usize, usize), usize> = BTreeMap::new();
         for pt in &ld.patches {
@@ -221,7 +194,7 @@ impl LinkView {
         });
     }
 
-    fn tables(&mut self, ui: &mut egui::Ui, ld: &ElfLinker) {
+    fn tables(&mut self, ui: &mut egui::Ui, ld: &Link) {
         ui.horizontal(|ui| {
             ui.label(RichText::new(format!("relocations ({})", ld.patches.len())).color(theme::DIM));
         });
@@ -251,13 +224,16 @@ impl LinkView {
         });
         egui::ScrollArea::vertical().id_salt("syms").auto_shrink([false, false]).show(ui, |ui| {
             egui::Grid::new("sym-grid").striped(true).num_columns(3).show(ui, |ui| {
-                for (name, s) in ld.symbols.iter() {
+                for s in &ld.symbols {
+                    let name = &s.name;
                     if !self.show_local && name.starts_with(".L") {
                         continue;
                     }
                     ui.label(RichText::new(name).monospace().color(if s.section == 0 { theme::hashed(name) } else { theme::LINK }));
                     ui.label(RichText::new(format!("0x{:08x}", s.value)).monospace().color(theme::DIM));
-                    ui.label(RichText::new(if s.section == 0 { ".text func" } else { ".data object" }).size(11.5).color(theme::FAINT));
+                    let ty = match s.stype { 1 => "object", 2 => "func", _ => "notype" };
+                    let sec = ld.sections.get(s.section).map_or("?", |x| x.name.as_str());
+                    ui.label(RichText::new(format!("{} {}", sec, ty)).size(11.5).color(theme::FAINT));
                     ui.end_row();
                 }
             });

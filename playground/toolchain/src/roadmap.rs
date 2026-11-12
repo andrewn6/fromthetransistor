@@ -78,10 +78,10 @@ pub const SECTIONS: &[Section] = &[
         items: &[
             Item {
                 title: "assembler",
-                lang: "python -> rust",
+                lang: "python",
                 status: Status::Done,
-                files: &["section3/assembler.py", "playground/toolchain/src/assembler.rs"],
-                note: "byte-identical rust port, two passes, literal pools, relocations",
+                files: &["section3/assembler.py"],
+                note: "runs in the page via pyodide: two passes, literal pools, relocations",
             },
             Item {
                 title: "arm7 cpu",
@@ -105,17 +105,17 @@ pub const SECTIONS: &[Section] = &[
         items: &[
             Item {
                 title: "c compiler",
-                lang: "python -> rust",
+                lang: "python",
                 status: Status::Done,
-                files: &["section4/compiler.py", "playground/toolchain/src/compiler/"],
-                note: "structs, typedef, sizeof, varargs, #include/#define, unsigned",
+                files: &["section4/compiler.py", "section4/build.py"],
+                note: "runs in the page via pyodide: structs, typedef, sizeof, varargs, #include/#define",
             },
             Item {
                 title: "linker",
-                lang: "python -> rust",
+                lang: "python",
                 status: Status::Done,
-                files: &["section4/linker.py", "playground/toolchain/src/linker.rs"],
-                note: "elf32 arm, single PT_LOAD, ABS32 + CALL relocations",
+                files: &["section4/linker.py"],
+                note: "runs in the page via pyodide: elf32 arm, single PT_LOAD, ABS32 + CALL relocations",
             },
             Item {
                 title: "libc + malloc",

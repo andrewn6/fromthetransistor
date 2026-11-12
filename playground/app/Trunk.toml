@@ -2,6 +2,19 @@
 target = "index.html"
 dist = "../dist"
 
+# rebuild (and live-reload the page) when the real toolchain changes
+[watch]
+watch = [
+  "src",
+  "index.html",
+  "../py",
+  "../examples",
+  "../../section3/assembler.py",
+  "../../section4/compiler.py",
+  "../../section4/linker.py",
+  "../../section4/build.py",
+]
+
 [serve]
 addresses = ["127.0.0.1"]
 port = 8080

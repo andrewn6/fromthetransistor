@@ -2,11 +2,10 @@
 // also the navigation), the source editor and the selected stage's view.
 
 use crate::examples::{Kind, EXAMPLES};
-use crate::{highlight, theme, views, widgets};
+use crate::snapshot::Snapshot;
+use crate::{highlight, python, theme, views, widgets};
 use eframe::egui::{self, Align2, Color32, CornerRadius, RichText, Sense, Stroke, StrokeKind};
 use std::sync::Arc;
-use toolchain::compiler::SourceFs;
-use toolchain::pipeline::{self, Build, Stage};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tab {
@@ -76,21 +75,15 @@ pub struct SourceFile {
     pub uart: bool,
 }
 
-// #include resolves against the open files by name
-struct FilesFs<'a>(&'a [SourceFile]);
-
-impl SourceFs for FilesFs<'_> {
-    fn read(&self, path: &str) -> Option<String> {
-        let name = path.rsplit('/').next().unwrap_or(path);
-        self.0.iter().find(|f| f.name == name).map(|f| f.text.clone())
-    }
-}
-
 pub struct App {
     pub files: Vec<SourceFile>,
     pub current: usize,
-    pub build: Build,
+    pub build: Snapshot,
     built_text: String,
+    // python toolchain state, and the .py version the current build used
+    py: python::State,
+    built_version: u32,
+    show_traceback: bool,
     last_edit: f64,
     pub tab: Tab,
     pub cpu: views::cpu::CpuView,
@@ -119,8 +112,11 @@ impl App {
         let mut app = App {
             files,
             current: 0,
-            build: Build::default(),
+            build: Snapshot::default(),
             built_text: String::new(),
+            py: python::State::default(),
+            built_version: 0,
+            show_traceback: false,
             last_edit: 0.0,
             tab: Tab::Cpu,
             cpu: views::cpu::CpuView::default(),
@@ -132,7 +128,6 @@ impl App {
         };
         let f = &app.files[0];
         app.cpu.configure(f.semihost, f.uart);
-        app.rebuild();
         app.apply_link(&location_hash());
         app
     }
@@ -158,11 +153,25 @@ impl App {
 
     pub fn rebuild(&mut self) {
         let f = &self.files[self.current];
-        self.build = match f.kind {
-            Kind::C => pipeline::build(&f.text, &f.name, &FilesFs(&self.files)),
-            Kind::Asm => pipeline::build_asm(&f.text),
-        };
         self.built_text = f.text.clone();
+        if !self.py.ready {
+            // the first build happens once python has loaded
+            return;
+        }
+        // every c file goes along so #include "vatlib.c" resolves
+        let files: serde_json::Map<String, serde_json::Value> = self
+            .files
+            .iter()
+            .filter(|x| x.kind == Kind::C || x.name == f.name)
+            .map(|x| (x.name.clone(), serde_json::Value::String(x.text.clone())))
+            .collect();
+        let req = serde_json::json!({
+            "name": f.name,
+            "kind": if f.kind == Kind::C { "c" } else { "asm" },
+            "files": files,
+        });
+        self.build = python::build(&req.to_string());
+        self.built_version = self.py.version;
         self.cpu.load(&self.build);
         self.asm.on_rebuild();
         self.ast.on_rebuild();
@@ -198,6 +207,14 @@ impl App {
             if let Some(i) = pick {
                 self.select(i);
             }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add_enabled(self.py.ready, egui::Button::new("reload .py")).on_hover_text("re-read compiler.py, assembler.py, linker.py and build.py from the server").clicked() {
+                    python::reload();
+                }
+                let col = if self.py.ready { theme::OK } else if self.py.status.starts_with("failed") || self.py.status.starts_with("pyodide failed") { theme::ERR } else { theme::WARN };
+                let files = if self.py.files.is_empty() { "nothing loaded yet".to_string() } else { self.py.files.join("\n") };
+                widgets::pill(ui, &self.py.status, col).on_hover_text(format!("the toolchain running in this page:\n{}", files));
+            });
         });
     }
 
@@ -205,10 +222,9 @@ impl App {
 
     fn pipeline(&mut self, ui: &mut egui::Ui) {
         let b = &self.build;
-        let c = &b.compiled;
         let is_c = self.file().kind == Kind::C;
-        let err_stage = b.error.as_ref().map(|(s, _)| *s);
-        let failed = |stages: &[Stage]| err_stage.map_or(false, |s| stages.contains(&s));
+        let err_stage = b.error.as_ref().map(|e| e.stage.as_str());
+        let failed = |stages: &[&str]| err_stage.map_or(false, |s| stages.contains(&s));
 
         struct Node {
             tab: Tab,
@@ -229,52 +245,51 @@ impl App {
             }
         };
 
-        let insns = b.asm.as_ref().map_or(0, |a| {
-            a.listing.iter().filter(|l| l.kind == toolchain::assembler::LineKind::Insn).count()
-        });
+        let insns = b.insn_count();
+        let assembled = b.text.is_some();
         let cpu_metric = self.cpu.metric();
         let nodes = vec![
             Node {
                 tab: Tab::Preprocess,
                 title: "preprocess",
-                metric: c.preprocessed.as_ref().map_or("-".into(), |p| format!("{} lines", p.lines().count())),
+                metric: b.preprocessed.as_ref().map_or("-".into(), |p| format!("{} lines", p.lines().count())),
                 color: theme::SOURCE,
-                state: state(c.preprocessed.is_some(), failed(&[Stage::Preprocess]), is_c),
+                state: state(b.preprocessed.is_some(), failed(&["preprocess", "import"]), is_c),
             },
             Node {
                 tab: Tab::Tokens,
                 title: "lex",
-                metric: c.tokens.as_ref().map_or("-".into(), |t| format!("{} tokens", t.len())),
+                metric: b.tokens.as_ref().map_or("-".into(), |t| format!("{} tokens", t.len())),
                 color: theme::TOKENS,
-                state: state(c.tokens.is_some(), failed(&[Stage::Lex]), is_c),
+                state: state(b.tokens.is_some(), failed(&["lex"]), is_c),
             },
             Node {
                 tab: Tab::Ast,
                 title: "parse",
-                metric: c.ast.as_ref().map_or("-".into(), |a| format!("{} decls", a.len())),
+                metric: b.ast.as_ref().map_or("-".into(), |a| format!("{} decls", a.len())),
                 color: theme::AST,
-                state: state(c.ast.is_some(), failed(&[Stage::Parse]), is_c),
+                state: state(b.ast.is_some(), failed(&["parse"]), is_c),
             },
             Node {
                 tab: Tab::Asm,
                 title: "codegen + assemble",
-                metric: if b.asm.is_some() { format!("{} instrs", insns) } else { "-".into() },
+                metric: if assembled { format!("{} instrs", insns) } else { "-".into() },
                 color: theme::ASM,
-                state: state(b.asm.is_some() && !failed(&[Stage::Assemble]), failed(&[Stage::Codegen, Stage::Assemble]), true),
+                state: state(assembled && !failed(&["assemble"]), failed(&["codegen", "assemble"]), true),
             },
             Node {
                 tab: Tab::Link,
                 title: "link",
-                metric: b.linker.as_ref().map_or("-".into(), |l| format!("{} syms, {} relocs", l.symbols.len(), l.relocations.len())),
+                metric: b.link.as_ref().map_or("-".into(), |l| format!("{} syms, {} relocs", l.symbols.len(), l.patches.len())),
                 color: theme::LINK,
-                state: state(b.elf.is_some(), failed(&[Stage::Link]), true),
+                state: state(b.elf.is_some(), failed(&["link"]), true),
             },
             Node {
                 tab: Tab::Elf,
                 title: "elf",
                 metric: b.elf.as_ref().map_or("-".into(), |e| widgets::bytes(e.len())),
                 color: theme::ELF,
-                state: state(b.elf.is_some(), false, true),
+                state: state(b.elf.is_some(), failed(&["build.py", "bridge"]), true),
             },
             Node {
                 tab: Tab::Cpu,
@@ -346,20 +361,32 @@ impl App {
         }
     }
 
-    fn error_banner(&self, ui: &mut egui::Ui) {
-        if let Some((stage, e)) = &self.build.error {
-            egui::Frame::NONE
-                .fill(theme::ERR.gamma_multiply(0.12))
-                .stroke(Stroke::new(1.0, theme::ERR.gamma_multiply(0.6)))
-                .corner_radius(CornerRadius::same(6))
-                .inner_margin(egui::Margin::symmetric(10, 6))
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new(format!("{} failed", stage.name())).color(theme::ERR).strong());
-                        ui.label(RichText::new(e.to_string()).monospace().color(theme::TEXT));
-                    });
+    fn error_banner(&mut self, ui: &mut egui::Ui) {
+        if !self.py.ready && self.build.error.is_none() && self.build.kind.is_empty() {
+            banner(ui, theme::WARN, |ui| {
+                ui.label(RichText::new(&self.py.status).color(theme::WARN));
+                widgets::caption(ui, "the page runs the repo's own compiler.py / assembler.py / linker.py / build.py in pyodide.");
+            });
+        }
+        if let Some(e) = &self.build.error {
+            let show = &mut self.show_traceback;
+            banner(ui, theme::ERR, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(format!("{} failed", e.stage)).color(theme::ERR).strong());
+                    ui.label(RichText::new(format!("{}: {}", e.kind, e.msg)).monospace().color(theme::TEXT));
+                    if !e.traceback.is_empty() {
+                        ui.toggle_value(show, "python traceback");
+                    }
                 });
+                if *show {
+                    ui.label(RichText::new(&e.traceback).monospace().size(11.5).color(theme::DIM));
+                }
+            });
+        }
+        for w in &self.build.warnings {
+            banner(ui, theme::WARN, |ui| {
+                ui.label(RichText::new(w).color(theme::WARN));
+            });
         }
     }
 
@@ -411,6 +438,19 @@ enum NodeState {
     NotApplicable,
 }
 
+fn banner(ui: &mut egui::Ui, color: Color32, add: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::NONE
+        .fill(color.gamma_multiply(0.12))
+        .stroke(Stroke::new(1.0, color.gamma_multiply(0.6)))
+        .corner_radius(CornerRadius::same(6))
+        .inner_margin(egui::Margin::symmetric(10, 6))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            add(ui);
+        });
+    ui.add_space(6.0);
+}
+
 fn dashed_rect(p: &egui::Painter, r: egui::Rect, stroke: Stroke) {
     let pts = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()];
     for w in pts.windows(2) {
@@ -420,6 +460,14 @@ fn dashed_rect(p: &egui::Painter, r: egui::Rect, stroke: Stroke) {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // python loads asynchronously; build as soon as it is ready and again
+        // whenever the .py files are reloaded
+        self.py = python::state();
+        if !self.py.ready {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
+        } else if self.py.version != self.built_version {
+            self.rebuild();
+        }
         // rebuild a moment after the last keystroke
         let now = ui.input(|i| i.time);
         if self.file().text != self.built_text {
@@ -450,9 +498,6 @@ impl eframe::App for App {
             .frame(egui::Frame::NONE.fill(theme::BG).inner_margin(egui::Margin::same(12)))
             .show(ui, |ui| {
                 self.error_banner(ui);
-                if self.build.error.is_some() {
-                    ui.add_space(8.0);
-                }
                 match self.tab {
                     Tab::Preprocess => views::preprocess::show(ui, &self.build),
                     Tab::Tokens => self.tokens.show(ui, &self.build),

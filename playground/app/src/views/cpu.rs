@@ -1,14 +1,13 @@
 // the arm7 model running the build: step by cycle or instruction, watch
 // the fetch/exec/block state machine, registers, bus, stack and output
 
-use crate::views::link::{func_at, functions, Func};
+use crate::snapshot::{func_at, Func, Snapshot};
 use crate::{theme, widgets};
 use eframe::egui::{self, Align2, Color32, CornerRadius, Pos2, Rect, RichText, Sense, Stroke, StrokeKind};
 use std::collections::HashSet;
 use toolchain::cpu::{Phase, FLAG_C, FLAG_N, FLAG_V, FLAG_Z};
 use toolchain::disasm;
 use toolchain::machine::{Machine, Status, UartMmio, RESULTS, SRAM_BASE, SRAM_SIZE};
-use toolchain::pipeline::Build;
 
 const SPEEDS: [(u64, &str); 7] = [
     (1, "1 cycle / frame"),
@@ -75,24 +74,22 @@ impl CpuView {
         self.uart = uart;
     }
 
-    pub fn load(&mut self, b: &Build) {
-        let (Some(flat), Some(ld)) = (&b.flat, &b.linker) else {
+    pub fn load(&mut self, b: &Snapshot) {
+        let (Some(flat), Some(ld)) = (&b.flat, &b.link) else {
             self.machine = None;
             self.image = None;
             self.running = false;
             return;
         };
         self.image = Some((flat.clone(), b.base, ld.entry));
-        self.funcs = functions(ld);
-        let mut labels: Vec<(u32, String)> = ld.symbols.iter().filter(|(_, s)| s.section == 0).map(|(n, s)| (s.value, n.to_string())).collect();
+        self.funcs = b.functions();
+        let mut labels: Vec<(u32, String)> = ld.symbols.iter().filter(|s| s.section == 0).map(|s| (s.value, s.name.clone())).collect();
         labels.sort();
         self.labels = labels;
         self.pool_words.clear();
-        if let Some(a) = &b.asm {
-            for &(base, _, n) in &a.chunks {
-                for k in 0..n {
-                    self.pool_words.insert(b.base + (base + 4 * k) as u32);
-                }
+        for &(base, _, n) in &b.chunks {
+            for k in 0..n {
+                self.pool_words.insert(b.base + (base + 4 * k) as u32);
             }
         }
         let text = &ld.sections[0];
@@ -150,7 +147,7 @@ impl CpuView {
         func_at(&self.funcs, addr).map_or("?", |i| self.funcs[i].name.as_str())
     }
 
-    pub fn show(&mut self, ui: &mut egui::Ui, _b: &Build) {
+    pub fn show(&mut self, ui: &mut egui::Ui, _b: &Snapshot) {
         if self.machine.is_none() {
             widgets::empty(ui, "nothing to run: the build did not produce an image");
             return;

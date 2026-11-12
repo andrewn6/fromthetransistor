@@ -4,10 +4,8 @@
 
 use crate::{highlight, theme, widgets};
 use eframe::egui::{self, Align2, Color32, CornerRadius, Rect, RichText, Sense, Stroke, StrokeKind};
-use toolchain::assembler::{LineKind, Sec};
+use crate::snapshot::{LineKind, Snapshot, R_ARM_ABS32};
 use toolchain::disasm;
-use toolchain::linker::{EHDR_SIZE, PHDR_SIZE, DEFAULT_LOAD_ADDR};
-use toolchain::pipeline::Build;
 
 pub struct AsmView {
     selected: Option<usize>,
@@ -25,29 +23,15 @@ impl Default for AsmView {
 struct Row<'a> {
     line: usize,
     text: &'a str,
-    place: Option<(Sec, usize, usize, LineKind)>, // section, offset, length, kind
+    place: Option<Place<'a>>,
 }
 
-pub fn text_base(b: &Build) -> u32 {
-    b.linker.as_ref().and_then(|l| l.sections.first()).map_or(DEFAULT_LOAD_ADDR + EHDR_SIZE + PHDR_SIZE, |s| s.addr)
-}
-
-// the final bytes of a section: linked (relocations applied) when available
-fn section_bytes(b: &Build, sec: Sec) -> &[u8] {
-    let i = if sec == Sec::Text { 0 } else { 1 };
-    if let Some(s) = b.linker.as_ref().and_then(|l| l.sections.get(i)) {
-        return &s.content;
-    }
-    match (&b.asm, sec) {
-        (Some(a), Sec::Text) => &a.text,
-        (Some(a), Sec::Data) => &a.data,
-        _ => &[],
-    }
-}
-
-pub fn addr_of(b: &Build, sec: Sec, off: usize) -> u32 {
-    let text_len = b.asm.as_ref().map_or(0, |a| a.text.len());
-    text_base(b) + if sec == Sec::Text { off } else { text_len + off } as u32
+#[derive(Clone, Copy)]
+struct Place<'a> {
+    sec: &'a str,
+    off: usize,
+    len: usize,
+    kind: LineKind,
 }
 
 fn word(bytes: &[u8], off: usize) -> Option<u32> {
@@ -57,18 +41,16 @@ fn word(bytes: &[u8], off: usize) -> Option<u32> {
 impl AsmView {
     pub fn on_rebuild(&mut self) {}
 
-    pub fn show(&mut self, ui: &mut egui::Ui, b: &Build) {
+    pub fn show(&mut self, ui: &mut egui::Ui, b: &Snapshot) {
         let Some(full) = &b.full_asm else {
             widgets::empty(ui, "no assembly yet: an earlier stage failed");
             return;
         };
         let lines = toolchain::py::splitlines(full);
-        let mut place = vec![None; lines.len()];
-        if let Some(a) = &b.asm {
-            for e in &a.listing {
-                if e.line < place.len() && (e.len > 0 || place[e.line].is_none()) {
-                    place[e.line] = Some((e.sec, e.off, e.len, e.kind));
-                }
+        let mut place: Vec<Option<Place>> = vec![None; lines.len()];
+        for e in &b.listing {
+            if e.line < place.len() && (e.len > 0 || place[e.line].is_none()) {
+                place[e.line] = Some(Place { sec: &e.sec, off: e.off, len: e.len, kind: e.kind });
             }
         }
         let first = if self.show_runtime { 0 } else { b.asm_line_offset.min(lines.len()) };
@@ -81,17 +63,17 @@ impl AsmView {
              reserves pool space for ldr =; pass 2 encodes each line into a 32-bit word.",
         );
         ui.horizontal_wrapped(|ui| {
-            if let Some(a) = &b.asm {
-                widgets::pill(ui, &format!(".text {}", widgets::bytes(a.text.len())), theme::ASM);
-                widgets::pill(ui, &format!(".data {}", widgets::bytes(a.data.len())), theme::LINK);
-                widgets::pill(ui, &format!("{} pool literals", a.pool.len()), theme::token_color("intl"));
-                widgets::pill(ui, &format!("{} relocations", a.relocs.len()), theme::ELF);
+            if b.text.is_some() {
+                widgets::pill(ui, &format!(".text {}", widgets::bytes(b.text_len())), theme::ASM);
+                widgets::pill(ui, &format!(".data {}", widgets::bytes(b.data.as_ref().map_or(0, |d| d.len()))), theme::LINK);
+                widgets::pill(ui, &format!("{} pool literals", b.pool_count), theme::token_color("intl"));
+                widgets::pill(ui, &format!("{} relocations", b.reloc_count), theme::ELF);
             }
             if b.asm_line_offset > 0 {
                 ui.checkbox(&mut self.show_runtime, "show the build.py runtime");
             }
             ui.separator();
-            for (name, l) in &b.compiled.func_lines {
+            for (name, l) in &b.func_lines() {
                 if ui.small_button(RichText::new(name).monospace()).clicked() {
                     let target = l + b.asm_line_offset;
                     self.jump = rows.iter().position(|r| r.line == target);
@@ -120,7 +102,7 @@ impl AsmView {
         });
     }
 
-    fn listing(&mut self, ui: &mut egui::Ui, b: &Build, rows: &[Row]) {
+    fn listing(&mut self, ui: &mut egui::Ui, b: &Snapshot, rows: &[Row]) {
         let row_h = 17.0;
         let mut area = egui::ScrollArea::vertical().id_salt("asm-list").auto_shrink([false, false]);
         if let Some(j) = self.jump.take() {
@@ -141,13 +123,13 @@ impl AsmView {
                 let p = ui.painter();
                 let y = r.center().y;
                 let font = theme::mono(12.0);
-                if let Some((sec, off, len, kind)) = row.place {
-                    let addr = addr_of(b, sec, off);
+                if let Some(Place { sec, off, len, kind }) = row.place {
+                    let addr = b.addr_of(sec, off);
                     if len > 0 || kind == LineKind::Label {
                         p.text(egui::pos2(r.left() + 4.0, y), Align2::LEFT_CENTER, format!("{:06x}", addr), font.clone(), theme::FAINT);
                     }
                     if len > 0 {
-                        let bytes = section_bytes(b, sec);
+                        let bytes = b.section_bytes(sec);
                         // instructions and pools are words; data directives show raw bytes
                         let first = if matches!(kind, LineKind::Insn | LineKind::Pool) {
                             word(bytes, off).map_or(String::new(), widgets::hex32)
@@ -155,7 +137,7 @@ impl AsmView {
                             bytes.get(off..off + len.min(4)).unwrap_or(&[]).iter().map(|x| format!("{:02x}", x)).collect()
                         };
                         let hex = if len > 4 { format!("{} +{}", first, len - 4) } else { first };
-                        let col = if sec == Sec::Data { theme::LINK } else { theme::ASM };
+                        let col = if sec == ".data" { theme::LINK } else { theme::ASM };
                         p.text(egui::pos2(r.left() + 60.0, y), Align2::LEFT_CENTER, hex, font.clone(), col.gamma_multiply(0.85));
                     }
                 }
@@ -167,7 +149,7 @@ impl AsmView {
         });
     }
 
-    fn detail(&self, ui: &mut egui::Ui, b: &Build, lines: &[&str], place: &[Option<(Sec, usize, usize, LineKind)>]) {
+    fn detail(&self, ui: &mut egui::Ui, b: &Snapshot, lines: &[&str], place: &[Option<Place>]) {
         let Some(line) = self.selected.filter(|l| *l < lines.len()) else {
             ui.label(RichText::new("click a line in the listing").color(theme::DIM));
             ui.add_space(10.0);
@@ -175,17 +157,17 @@ impl AsmView {
             return;
         };
         ui.label(RichText::new(lines[line].trim()).monospace().size(14.0).color(theme::ASM));
-        let Some((sec, off, len, kind)) = place[line] else {
+        let Some(Place { sec, off, len, kind }) = place[line] else {
             widgets::caption(ui, "this line emits no bytes (comment, .global or a section switch).");
             return;
         };
-        let addr = addr_of(b, sec, off);
-        ui.label(RichText::new(format!("{} + 0x{:x}  =  address 0x{:08x}, {} bytes", sec.name(), off, addr, len)).monospace().color(theme::DIM));
+        let addr = b.addr_of(sec, off);
+        ui.label(RichText::new(format!("{} + 0x{:x}  =  address 0x{:08x}, {} bytes", sec, off, addr, len)).monospace().color(theme::DIM));
         if kind == LineKind::Label {
             widgets::caption(ui, "a label: pass 1 records its section and offset, the linker turns it into an address.");
             return;
         }
-        let bytes = section_bytes(b, sec);
+        let bytes = b.section_bytes(sec);
         if kind == LineKind::Insn {
             let Some(w) = word(bytes, off) else { return };
             ui.add_space(6.0);
@@ -193,25 +175,26 @@ impl AsmView {
             ui.add_space(4.0);
             bit_diagram(ui, w);
             // relocation patched into this word?
-            if let Some(p) = b.linker.as_ref().and_then(|l| l.patches.iter().find(|p| p.section == (sec == Sec::Data) as usize && p.offset as usize == off)) {
+            let sec_idx = (sec == ".data") as usize;
+            if let Some(p) = b.link.as_ref().and_then(|l| l.patches.iter().find(|p| p.section == sec_idx && p.offset as usize == off)) {
                 ui.add_space(8.0);
                 widgets::heading(ui, "relocation", theme::LINK);
                 ui.label(RichText::new(format!(
                     "{} -> {}  (0x{:08x})\nassembler left 0x{:08x}, linker wrote 0x{:08x}",
-                    if p.rtype == 2 { "R_ARM_ABS32" } else { "R_ARM_CALL" },
+                    if p.rtype == R_ARM_ABS32 { "R_ARM_ABS32" } else { "R_ARM_CALL" },
                     p.symbol, p.target, p.before, p.after
                 )).monospace());
-                if p.rtype != 2 {
+                if p.rtype != R_ARM_ABS32 {
                     widgets::caption(ui, &format!("offset24 = (target - (P + 8)) >> 2 = (0x{:x} - 0x{:x}) >> 2", p.target, p.place + 8));
                 }
             }
             // ldr rd, =x reads its literal pc-relative
             if disasm::classify(w) == disasm::Class::LoadStore && (w >> 16) & 0xF == 15 {
                 let lit = addr.wrapping_add(8).wrapping_add(w & 0xFFF);
-                let lit_off = lit.wrapping_sub(text_base(b)) as usize;
+                let lit_off = lit.wrapping_sub(b.text_base()) as usize;
                 ui.add_space(8.0);
                 widgets::heading(ui, "literal pool", theme::token_color("intl"));
-                let val = word(section_bytes(b, Sec::Text), lit_off).unwrap_or(0);
+                let val = word(b.section_bytes(".text"), lit_off).unwrap_or(0);
                 ui.label(RichText::new(format!("pc + 8 + {} = 0x{:08x}\nholds 0x{:08x} ({})", w & 0xFFF, lit, val, val as i32)).monospace());
                 widgets::caption(ui, "mov only encodes 8-bit immediates, so bigger constants and addresses live in a pool after the function and get loaded relative to pc.");
             }

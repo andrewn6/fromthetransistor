@@ -2,7 +2,7 @@
 
 use crate::{theme, widgets};
 use eframe::egui::{self, text::LayoutJob, Color32, CornerRadius, RichText, Sense, Stroke, StrokeKind, TextFormat};
-use toolchain::pipeline::Build;
+use crate::snapshot::Snapshot;
 
 #[derive(Default)]
 pub struct TokensView {
@@ -10,8 +10,8 @@ pub struct TokensView {
 }
 
 impl TokensView {
-    pub fn show(&mut self, ui: &mut egui::Ui, b: &Build) {
-        let c = &b.compiled;
+    pub fn show(&mut self, ui: &mut egui::Ui, b: &Snapshot) {
+        let c = b;
         let (Some(toks), Some(pre)) = (&c.tokens, &c.preprocessed) else {
             widgets::empty(ui, "no tokens: this is an assembly file, or an earlier stage failed");
             return;
@@ -22,7 +22,7 @@ impl TokensView {
         // counts per kind
         ui.horizontal_wrapped(|ui| {
             for (kind, label) in [("kw", "keyword"), ("id", "identifier"), ("intl", "int"), ("chrl", "char"), ("strl", "string"), ("p", "punct"), ("o", "operator")] {
-                let n = toks.iter().filter(|t| t.tok.kind() == kind).count();
+                let n = toks.iter().filter(|t| t.kind == kind).count();
                 widgets::pill(ui, &format!("{} {}", label, n), theme::token_color(kind));
             }
         });
@@ -36,8 +36,8 @@ impl TokensView {
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
                         for (i, t) in toks.iter().enumerate() {
-                            let color = theme::token_color(t.tok.kind());
-                            let text = t.tok.text();
+                            let color = theme::token_color(&t.kind);
+                            let text = if t.kind == "strl" || t.kind == "chrl" { format!("{:?}", t.text) } else { t.text.clone() };
                             let galley = ui.painter().layout_no_wrap(text, theme::mono(12.0), color);
                             let size = galley.size() + egui::vec2(10.0, 6.0);
                             let (r, resp) = ui.allocate_exact_size(size, Sense::hover());
@@ -53,7 +53,10 @@ impl TokensView {
                             if resp.hovered() {
                                 hovered_now.set(Some(i));
                             }
-                            resp.on_hover_text(format!("{}  [{}..{}]", t.tok.repr(), t.start, t.end));
+                            resp.on_hover_text(match (t.start, t.end) {
+                                (Some(s), Some(e)) => format!("{}  [{}..{}]", t.repr, s, e),
+                                _ => t.repr.clone(),
+                            });
                         }
                     });
                 });
@@ -61,7 +64,7 @@ impl TokensView {
             widgets::card(&mut cols[1], |ui| {
                 ui.label(RichText::new("preprocessed source").color(theme::DIM));
                 egui::ScrollArea::both().id_salt("toksrc").auto_shrink([false, false]).show(ui, |ui| {
-                    let span = self.hovered.and_then(|i| toks.get(i)).map(|t| (t.start, t.end));
+                    let span = self.hovered.and_then(|i| toks.get(i)).and_then(|t| Some((t.start?, t.end?)));
                     ui.label(source_with_span(pre, span));
                 });
             });

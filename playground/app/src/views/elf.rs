@@ -3,8 +3,7 @@
 
 use crate::{theme, widgets};
 use eframe::egui::{self, Align2, Color32, CornerRadius, Rect, RichText, Sense, Stroke, StrokeKind};
-use toolchain::linker::Region;
-use toolchain::pipeline::Build;
+use crate::snapshot::{Region, Snapshot};
 
 #[derive(Default)]
 pub struct ElfView {
@@ -35,7 +34,7 @@ fn cstr(b: &[u8], o: usize) -> String {
 }
 
 impl ElfView {
-    pub fn show(&mut self, ui: &mut egui::Ui, b: &Build) {
+    pub fn show(&mut self, ui: &mut egui::Ui, b: &Snapshot) {
         let Some(elf) = &b.elf else {
             widgets::empty(ui, "no elf yet: an earlier stage failed");
             return;
@@ -43,7 +42,7 @@ impl ElfView {
         widgets::heading(ui, "elf32 executable", theme::ELF);
         widgets::caption(ui, "the exact bytes linker.py writes. qemu-system-arm -M versatilepb -nographic -semihosting -kernel prog.elf runs it.");
         ui.add_space(4.0);
-        let regions = &b.regions;
+        let regions = &b.regions();
         widgets::card(ui, |ui| {
             ui.set_width(ui.available_width());
             self.byte_map(ui, elf.len(), regions);
