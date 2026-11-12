@@ -3,6 +3,7 @@
 // whole pipeline can run in a browser (wasm) or natively.
 
 pub mod assembler;
+pub mod board;
 pub mod compiler;
 pub mod cpu;
 pub mod disasm;

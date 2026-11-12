@@ -11,6 +11,9 @@
     <link data-trunk rel="copy-file" href="../../section4/linker.py" data-target-path="py" />
     <link data-trunk rel="copy-file" href="../../section4/build.py" data-target-path="py" />
     <link data-trunk rel="copy-file" href="../py/bridge.py" data-target-path="py" />
+    <!-- boot roms for the board: the course's, and the playground's stand-in -->
+    <link data-trunk rel="copy-file" href="../../section3/bootrom.asm" data-target-path="py" />
+    <link data-trunk rel="copy-file" href="../boot/rom.s" data-target-path="py" />
     <style>
       html, body { margin: 0; height: 100%; overflow: hidden; background: #111317; }
       canvas { display: block; width: 100%; height: 100%; }
@@ -26,10 +29,15 @@
         "/repo/section4/linker.py": "py/linker.py",
         "/repo/section4/build.py": "py/build.py",
         "/repo/playground/py/bridge.py": "py/bridge.py",
+        "/repo/section3/bootrom.asm": "py/bootrom.asm",
+        "/repo/playground/boot/rom.s": "py/rom.s",
       };
+      // the board's boot roms, in the order the board prefers them
+      const ROMS = ["section3/bootrom.asm", "playground/boot/rom.s"];
       window.ftt = { ready: false, status: "loading python (pyodide)...", version: 0, files: [] };
       let pyodide = null;
       let run = null;
+      let rom = null;
 
       async function loadFiles() {
         const loaded = [];
@@ -45,6 +53,7 @@
           "import sys\nsys.modules.pop('bridge', None)\nsys.path.insert(0, '/repo/playground/py')\n" +
           "import bridge\nbridge.setup('/repo')");
         run = pyodide.runPython("bridge.run");
+        rom = pyodide.runPython("bridge.rom");
         return loaded;
       }
 
@@ -62,6 +71,13 @@
       };
 
       window.ftt_build = (request) => run(request);
+
+      // assemble + link every boot rom at `base` with the repo's own tools
+      window.ftt_roms = (base) => {
+        const files = {};
+        for (const name of ROMS) files[name] = pyodide.FS.readFile("/repo/" + name, { encoding: "utf8" });
+        return rom(JSON.stringify({ base, files }));
+      };
 
       (async () => {
         try {

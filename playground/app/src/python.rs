@@ -2,7 +2,33 @@
 // the page exposes window.ftt = { ready, status, version, files } and
 // window.ftt_build(request_json) -> response_json.
 
-use crate::snapshot::Snapshot;
+use crate::snapshot::{PyError, Snapshot};
+use serde::Deserialize;
+
+// one boot rom as the bridge built it: an image, or the stage that failed
+#[derive(Clone, Debug, Deserialize)]
+pub struct RomBuild {
+    #[serde(default, deserialize_with = "opt_hex")]
+    pub flat: Option<Vec<u8>>,
+    #[serde(default)]
+    pub base: u32,
+    #[serde(default)]
+    pub entry: u32,
+    pub error: Option<PyError>,
+}
+
+fn opt_hex<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Vec<u8>>, D::Error> {
+    crate::snapshot::hex(d).map(Some)
+}
+
+// (repo path, build), in the order the board prefers them
+pub type Roms = Vec<(String, RomBuild)>;
+
+fn parse_roms(json: &str) -> Roms {
+    serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(json)
+        .map(|m| m.into_iter().filter_map(|(k, v)| Some((k, serde_json::from_value(v).ok()?))).collect())
+        .unwrap_or_default()
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct State {
@@ -55,6 +81,15 @@ mod imp {
         }
     }
 
+    pub fn roms(base: u32) -> Roms {
+        let f = get(&window(), "ftt_roms");
+        let Some(f) = f.dyn_ref::<js_sys::Function>() else { return Vec::new() };
+        match f.call1(&JsValue::NULL, &JsValue::from_f64(base as f64)) {
+            Ok(v) => parse_roms(&v.as_string().unwrap_or_default()),
+            Err(_) => Vec::new(),
+        }
+    }
+
     pub fn reload() {
         let f = get(&window(), "ftt_reload");
         if let Some(f) = f.dyn_ref::<js_sys::Function>() {
@@ -73,6 +108,9 @@ mod imp {
         Snapshot::failed("python only runs in the browser build")
     }
     pub fn reload() {}
+    pub fn roms(_base: u32) -> Roms {
+        Vec::new()
+    }
 }
 
-pub use imp::{build, reload, state};
+pub use imp::{build, reload, roms, state};

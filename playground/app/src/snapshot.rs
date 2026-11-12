@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Deserializer};
 
-fn hex<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+pub fn hex<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
     let s = String::deserialize(d)?;
     (0..s.len() / 2).map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).map_err(serde::de::Error::custom)).collect()
 }

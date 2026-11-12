@@ -16,10 +16,11 @@ pub enum Tab {
     Link,
     Elf,
     Cpu,
+    Board,
 }
 
 impl Tab {
-    const ALL: [Tab; 7] = [Tab::Preprocess, Tab::Tokens, Tab::Ast, Tab::Asm, Tab::Link, Tab::Elf, Tab::Cpu];
+    const ALL: [Tab; 8] = [Tab::Preprocess, Tab::Tokens, Tab::Ast, Tab::Asm, Tab::Link, Tab::Elf, Tab::Cpu, Tab::Board];
 
     fn slug(self) -> &'static str {
         match self {
@@ -30,6 +31,7 @@ impl Tab {
             Tab::Link => "link",
             Tab::Elf => "elf",
             Tab::Cpu => "cpu",
+            Tab::Board => "board",
         }
     }
 
@@ -90,6 +92,7 @@ pub struct App {
     pub tokens: views::tokens::TokensView,
     pub link: views::link::LinkView,
     pub elf: views::elf::ElfView,
+    pub board: views::board::BoardView,
 }
 
 impl App {
@@ -123,6 +126,7 @@ impl App {
             tokens: views::tokens::TokensView::default(),
             link: views::link::LinkView::default(),
             elf: views::elf::ElfView::default(),
+            board: views::board::BoardView::default(),
         };
         let f = &app.files[0];
         app.cpu.configure(f.semihost, f.uart);
@@ -326,6 +330,23 @@ impl App {
         for w in centers.windows(2) {
             ui.painter().line_segment([w[0] + egui::vec2(0.0, 11.0), w[1] - egui::vec2(0.0, 11.0)], Stroke::new(1.0, theme::FAINT.gamma_multiply(0.6)));
         }
+
+        ui.add_space(14.0);
+        section_label(ui, "hardware");
+        let on = self.board.board.powered();
+        let detail = self.board.metric();
+        let resp = nav_row(ui, row_h, self.tab == Tab::Board, "fpga board", &detail, |p, c| {
+            // a small chip, lit while the board has power
+            let chip = egui::Rect::from_center_size(c, egui::vec2(14.0, 14.0));
+            p.rect_stroke(chip, CornerRadius::same(2), Stroke::new(1.5, if on { theme::OK } else { theme::BORDER }), egui::StrokeKind::Inside);
+            if on {
+                p.rect_filled(chip.shrink(4.0), CornerRadius::same(1), theme::OK);
+            }
+        }, false)
+        .0;
+        if resp.clicked() {
+            self.tab = Tab::Board;
+        }
     }
 
     fn error_banner(&mut self, ui: &mut egui::Ui) {
@@ -472,6 +493,9 @@ impl eframe::App for App {
             }
         }
         self.cpu.tick(ui.ctx());
+        // the board runs whichever page is open, like real hardware
+        self.board.refresh_roms(&self.py);
+        self.board.tick(ui.ctx());
         set_location_hash(&self.link());
 
         let edge = Stroke::new(1.0, theme::BORDER);
@@ -486,11 +510,14 @@ impl eframe::App for App {
             .frame(egui::Frame::NONE.fill(theme::PANEL).stroke(edge).inner_margin(egui::Margin::symmetric(10, 12)))
             .show(ui, |ui| self.sidebar(ui));
 
-        egui::Panel::left("editor")
-            .resizable(true)
-            .default_size(400.0)
-            .frame(egui::Frame::NONE.fill(theme::BG).stroke(edge).inner_margin(egui::Margin::same(12)))
-            .show(ui, |ui| self.editor(ui));
+        // the board page is the whole machine; the editor stays on the pipeline pages
+        if self.tab != Tab::Board {
+            egui::Panel::left("editor")
+                .resizable(true)
+                .default_size(400.0)
+                .frame(egui::Frame::NONE.fill(theme::BG).stroke(edge).inner_margin(egui::Margin::same(12)))
+                .show(ui, |ui| self.editor(ui));
+        }
 
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(theme::BG).inner_margin(egui::Margin::same(16)))
@@ -504,6 +531,10 @@ impl eframe::App for App {
                     Tab::Link => self.link.show(ui, &self.build),
                     Tab::Elf => self.elf.show(ui, &self.build),
                     Tab::Cpu => self.cpu.show(ui, &self.build),
+                    Tab::Board => {
+                        let name = self.files[self.current].name.clone();
+                        self.board.show(ui, &self.build, &name)
+                    }
                 }
             });
     }

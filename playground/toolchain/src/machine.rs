@@ -32,6 +32,8 @@ pub trait Device {
     }
     // a byte typed into the console (uart rx)
     fn input(&mut self, _b: u8) {}
+    // one clock edge, for devices with timing (the board's uart)
+    fn tick(&mut self) {}
 }
 
 pub struct Ram {
@@ -284,6 +286,7 @@ impl Machine {
         }
 
         for d in self.bus.devices.iter_mut() {
+            d.tick();
             for b in d.drain_output() {
                 self.console.push(b as char);
             }

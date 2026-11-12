@@ -9,6 +9,8 @@ watch = [
   "index.html",
   "../py",
   "../examples",
+  "../boot",
+  "../../section3/bootrom.asm",
   "../../section3/assembler.py",
   "../../section4/compiler.py",
   "../../section4/linker.py",

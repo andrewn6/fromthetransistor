@@ -170,9 +170,9 @@ def _stage(name, fn, *args):
         raise StageError(name, e) from e
 
 
-def _link(linker, text, data, symbols, relocs, out):
+def _link(linker, text, data, symbols, relocs, out, load_addr=None):
     # build.py's linking steps, plus the before/after of every patched word
-    ld = linker.ELFLinker()
+    ld = linker.ELFLinker() if load_addr is None else linker.ELFLinker(load_addr=load_addr)
     ld.add_section(".text", text)
     ld.add_section(".data", data, flags=linker.SHF_ALLOC | linker.SHF_WRITE)
     for name, (sec, off) in symbols.items():
@@ -302,6 +302,36 @@ def _run_asm(out, src, assembler, linker):
     out["elf"] = _hex(_write_tmp(ld, "play_s.elf"))
     out["flat"] = _hex(b"".join(bytes(s.content) for s in ld.sections))
     out["base"] = ld.sections[0].addr
+
+
+def rom(request):
+    """board boot roms. request json: {"base": 0xf0000, "files": {name: text}}.
+    each file is assembled and linked at base with the repo's own tools;
+    returns {name: {"flat", "base", "entry"} or {"error": {...}}}"""
+    req = json.loads(request)
+    result = {}
+    try:
+        _, assembler, linker, _ = _stage("import", _mods)
+    except StageError as e:
+        return json.dumps({n: {"error": _err(e)} for n in req["files"]})
+    for name, text in req["files"].items():
+        out = {"warnings": []}
+        try:
+            a = assembler.Asm()
+            _stage("assemble", a.pass1, text)
+            _stage("assemble", a.pass2)
+            t, d, symbols, relocs = a.object()
+            ld = _stage("link", _link, linker, t, d, symbols, relocs, out, req["base"])
+            result[name] = {
+                "flat": _hex(b"".join(bytes(s.content) for s in ld.sections)),
+                "base": ld.sections[0].addr,
+                "entry": ld.entry,
+            }
+        except StageError as e:
+            result[name] = {"error": _err(e)}
+        except Exception as e:
+            result[name] = {"error": _err(StageError("bridge", e))}
+    return json.dumps(result)
 
 
 def _assemble(out, full, assembler):
