@@ -156,6 +156,133 @@ def _listing(assembler, full):
     return out
 
 
+# ---------- source map ----------
+# compiler.py keeps no line numbers. these subclasses only watch: the parser
+# notes which tokens each statement used, codegen notes which statement it
+# was working on when each asm line was emitted. the asm is unchanged (the
+# elf check against build.build() would catch it otherwise).
+
+def _pre_lines(src, path):
+    # (file, line) for every line compiler.preprocess(src, path) returns, by
+    # walking the same lines it walks: includes are inlined, directives drop
+    out = []
+    for i, line in enumerate(src.splitlines()):
+        s = line.strip()
+        if s.startswith("#include"):
+            inc = os.path.join(os.path.dirname(os.path.abspath(path)), s[len("#include"):].strip()[1:-1])
+            with open(inc) as f:
+                sub = _pre_lines(f.read(), inc)
+            # an include with nothing left still adds one empty line
+            out.extend(sub or [None])
+        elif not s.startswith("#"):
+            out.append((os.path.basename(path), i))
+    return out
+
+
+def _mapped(compiler):
+    class Parser(compiler.Parser):
+        def __init__(self, toks):
+            super().__init__(toks)
+            self.spans = []   # (node, first token, last token)
+
+        def parse_stmt(self):
+            start = self.pos
+            s = super().parse_stmt()
+            self.spans.append((s, start, self.pos - 1))
+            return s
+
+        def parse_top(self):
+            start = self.pos
+            d = super().parse_top()
+            self.spans.append((d, start, self.pos - 1))
+            return d
+
+    class CodeGen(compiler.CodeGen):
+        def __init__(self, spans):
+            super().__init__()
+            self.where = {id(n): (a, b) for n, a, b in spans}
+            self.stack = [None]
+            self.marks = []   # (asm line index, token): lines from here on came from token's line
+            self.closing = None
+
+        def _at(self, tok):
+            self.marks.append((len(self.lines), tok))
+
+        def gen_stmt(self, s):
+            w = self.where.get(id(s))
+            # blocks emit nothing of their own, their statements map themselves
+            if w is None or isinstance(s, compiler.SBlock):
+                return super().gen_stmt(s)
+            self.stack.append(w[0])
+            self._at(w[0])
+            try:
+                return super().gen_stmt(s)
+            finally:
+                self.stack.pop()
+                self._at(self.stack[-1])
+
+        def gen_func(self, fn):
+            w = self.where.get(id(fn))
+            self.stack = [w[0] if w else None]
+            self.closing = w[1] if w else None
+            self._at(self.stack[0])
+            try:
+                return super().gen_func(fn)
+            finally:
+                self.stack = [None]
+                self._at(None)
+
+        def label(self, name):
+            # the epilogue belongs to the function's closing brace
+            if name == getattr(self, "epilogue", None) and self.closing is not None:
+                self.stack = [self.closing]
+                self._at(self.closing)
+            return super().label(name)
+
+    return Parser, CodeGen
+
+
+def _srcmap(out, src, path, pre, spans, parser, cg, compiler):
+    # asm line -> [file, line]: token -> offset in the preprocessed text ->
+    # preprocessed line -> source line
+    import bisect
+    lines = _pre_lines(src, path)
+    if len(lines) != len(pre.split("\n")):
+        out["warnings"].append("source map unavailable: compiler.preprocess's line structure changed; "
+                               "update _pre_lines in playground/py/bridge.py")
+        return
+    starts = [0] + [i + 1 for i, c in enumerate(pre) if c == "\n"]
+
+    def loc(tok):
+        if tok is None or tok >= len(spans) or spans[tok] is None:
+            return None
+        return lines[bisect.bisect_right(starts, spans[tok][0]) - 1]
+
+    out["pre_lines"] = [list(l) if l else None for l in lines]
+    n = len(cg.lines)
+    asm_src = [None] * n
+    marks = cg.marks + [(n, None)]
+    for (a, tok), (b, _) in zip(marks, marks[1:]):
+        l = loc(tok)
+        for i in range(a, min(b, n)):
+            asm_src[i] = list(l) if l else None
+    out["asm_src"] = asm_src
+    # what each line parsed into, for the lineage strip
+    stmts = {}
+    for node, a, _ in parser.spans:
+        l = loc(a)
+        if l and not isinstance(node, compiler.SBlock):
+            stmts.setdefault("%s:%d" % l, []).append(type(node).__name__)
+    out["stmts"] = stmts
+    out["sources"] = {}
+    for name in sorted({l[0] for l in lines if l}):
+        try:
+            with open(os.path.join(os.path.dirname(path), name)) as f:
+                out["sources"][name] = f.read()
+        except OSError:
+            pass
+
+
 # ---------- the pipeline ----------
 
 class StageError(Exception):
@@ -262,11 +389,18 @@ def _run_c(out, src, path, compiler, assembler, linker, build):
     out["tokens"] = [{"kind": t.kind, "text": str(t.val), "repr": repr(t),
                       "start": s[0] if s else None, "end": s[1] if s else None}
                      for t, s in zip(toks, spans)]
-    ast = _stage("parse", lambda: compiler.Parser(toks).parse_program())
+    Parser, CodeGen = _mapped(compiler)
+    parser = Parser(toks)
+    ast = _stage("parse", parser.parse_program)
     out["ast"] = _node(ast, compiler)
     out["structs"] = _structs(compiler)
-    asm = _stage("codegen", lambda: compiler.CodeGen().gen_program(ast))
+    cg = CodeGen(parser.spans)
+    asm = _stage("codegen", cg.gen_program, ast)
     out["asm"] = asm
+    try:
+        _srcmap(out, src, path, pre, spans, parser, cg, compiler)
+    except Exception as e:
+        out["warnings"].append("source map unavailable: %s: %s" % (type(e).__name__, e))
 
     full = build.RUNTIME + "\n" + asm
     out["full_asm"] = full

@@ -3,14 +3,17 @@
 use crate::{theme, widgets};
 use eframe::egui::{self, text::LayoutJob, Color32, CornerRadius, RichText, Sense, Stroke, StrokeKind, TextFormat};
 use crate::snapshot::Snapshot;
+use crate::srcmap::{Loc, SourceMap};
 
 #[derive(Default)]
 pub struct TokensView {
     hovered: Option<usize>,
+    // the followed line this view last jumped to
+    seen: Option<Loc>,
 }
 
 impl TokensView {
-    pub fn show(&mut self, ui: &mut egui::Ui, b: &Snapshot) {
+    pub fn show(&mut self, ui: &mut egui::Ui, b: &Snapshot, sm: &SourceMap, focus: &mut Option<Loc>) {
         let c = b;
         let (Some(toks), Some(pre)) = (&c.tokens, &c.preprocessed) else {
             widgets::empty(ui, "no tokens: this is an assembly file, or an earlier stage failed");
@@ -29,6 +32,16 @@ impl TokensView {
         ui.add_space(6.0);
 
         let hovered_now = std::cell::Cell::new(None);
+        let picked = std::cell::Cell::new(None);
+        // tokens of the followed line get a ring; a new line lights its first token
+        let tok_loc = |t: &crate::snapshot::Token| t.start.and_then(|s| sm.pre_loc(sm.pre_line_of(s)));
+        let jumped = *focus != self.seen;
+        if jumped {
+            if let Some(i) = toks.iter().position(|t| focus.is_some() && tok_loc(t) == focus.as_ref()) {
+                self.hovered = Some(i);
+            }
+        }
+        let mut scrolled = !jumped;
         ui.columns(2, |cols| {
             widgets::card(&mut cols[0], |ui| {
                 ui.label(RichText::new(format!("{} tokens", toks.len())).color(theme::DIM));
@@ -40,8 +53,19 @@ impl TokensView {
                             let text = if t.kind == "strl" || t.kind == "chrl" { format!("{:?}", t.text) } else { t.text.clone() };
                             let galley = ui.painter().layout_no_wrap(text, theme::mono(12.0), color);
                             let size = galley.size() + egui::vec2(10.0, 6.0);
-                            let (r, resp) = ui.allocate_exact_size(size, Sense::hover());
+                            let (r, resp) = ui.allocate_exact_size(size, Sense::click());
                             let on = self.hovered == Some(i);
+                            let followed = focus.is_some() && tok_loc(t) == focus.as_ref();
+                            if followed {
+                                ui.painter().rect_stroke(r.expand(1.5), CornerRadius::same(5), Stroke::new(1.0, theme::ACCENT), StrokeKind::Outside);
+                                if !scrolled {
+                                    ui.scroll_to_rect(r, Some(egui::Align::Center));
+                                    scrolled = true;
+                                }
+                            }
+                            if resp.clicked() {
+                                picked.set(Some(i));
+                            }
                             ui.painter().rect(
                                 r,
                                 CornerRadius::same(4),
@@ -73,6 +97,10 @@ impl TokensView {
         if let Some(h) = hovered_now.get() {
             self.hovered = Some(h);
         }
+        if let Some(l) = picked.get().and_then(|i| tok_loc(&toks[i])) {
+            *focus = Some(l.clone());
+        }
+        self.seen = focus.clone();
     }
 }
 

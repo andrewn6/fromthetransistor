@@ -2,9 +2,10 @@
 // the fetch/exec/block state machine, registers, bus, stack and output
 
 use crate::snapshot::{func_at, Func, Snapshot};
+use crate::srcmap::{Loc, SourceMap};
 use crate::{theme, widgets};
 use eframe::egui::{self, Align2, Color32, CornerRadius, Pos2, Rect, RichText, Sense, Stroke, StrokeKind};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use toolchain::cpu::{Phase, FLAG_C, FLAG_N, FLAG_V, FLAG_Z};
 use toolchain::disasm;
 use toolchain::machine::{Machine, Status, UartMmio, RESULTS, SRAM_BASE, SRAM_SIZE};
@@ -18,6 +19,14 @@ const SPEEDS: [(u64, &str); 7] = [
     (100_000, "100k / frame"),
     (1_000_000, "1M / frame"),
 ];
+
+// a disassembly row: an instruction word, or (objdump -S style) the source
+// line the instructions below it came from
+#[derive(Clone)]
+enum Row {
+    Src(Loc),
+    Insn(u32),
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MemView {
@@ -43,6 +52,14 @@ pub struct CpuView {
     follow: bool,
     uart_line: String,
     mem: MemView,
+    // disassembly rows with and without source lines between them
+    src_rows: Vec<Row>,
+    src_row_of: HashMap<u32, usize>,
+    interleave: bool,
+    // follow pc scrolls only when pc moves, so a jump elsewhere sticks
+    last_pc: u32,
+    // the followed line this view last jumped to
+    seen: Option<Loc>,
 }
 
 impl Default for CpuView {
@@ -64,6 +81,11 @@ impl Default for CpuView {
             follow: true,
             uart_line: String::new(),
             mem: MemView::Stack,
+            src_rows: vec![],
+            src_row_of: HashMap::new(),
+            interleave: true,
+            last_pc: u32::MAX,
+            seen: None,
         }
     }
 }
@@ -74,7 +96,7 @@ impl CpuView {
         self.uart = uart;
     }
 
-    pub fn load(&mut self, b: &Snapshot) {
+    pub fn load(&mut self, b: &Snapshot, sm: &SourceMap) {
         let (Some(flat), Some(ld)) = (&b.flat, &b.link) else {
             self.machine = None;
             self.image = None;
@@ -95,6 +117,22 @@ impl CpuView {
         let text = &ld.sections[0];
         self.text_range = (text.addr, text.addr + text.size());
         self.data_range = ld.sections.get(1).map_or((0, 0), |s| (s.addr, s.addr + s.size()));
+        // a source row wherever the c line changes. asm (a .s file or the
+        // build.py runtime) is already one line per instruction, so it gets none.
+        self.src_rows.clear();
+        self.src_row_of.clear();
+        let mut last = None;
+        for a in (self.text_range.0..self.text_range.1).step_by(4) {
+            let l = sm.at(a).filter(|l| b.kind == "c" && l.file != crate::srcmap::RUNTIME);
+            if l.is_some() && l != last {
+                self.src_rows.push(Row::Src(l.unwrap().clone()));
+            }
+            if l.is_some() {
+                last = l;
+            }
+            self.src_row_of.insert(a, self.src_rows.len());
+            self.src_rows.push(Row::Insn(a));
+        }
         self.reset();
         self.running = self.autorun;
     }
@@ -112,6 +150,22 @@ impl CpuView {
         self.prev_regs = m.cpu.regs;
         self.machine = Some(m);
         self.running = false;
+    }
+
+    // the instruction being executed (in FETCH: about to be fetched)
+    pub fn exec_addr(&self) -> Option<u32> {
+        let m = self.machine.as_ref()?;
+        Some(if m.cpu.phase == Phase::Fetch { m.cpu.pc } else { m.cpu.pc.wrapping_sub(4) })
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.running
+    }
+
+    // times the instruction at a retired
+    pub fn heat(&self, a: u32) -> u32 {
+        let Some(m) = &self.machine else { return 0 };
+        a.checked_sub(SRAM_BASE).and_then(|o| m.heat.get((o / 4) as usize)).copied().unwrap_or(0)
     }
 
     pub fn metric(&self) -> String {
@@ -147,7 +201,7 @@ impl CpuView {
         func_at(&self.funcs, addr).map_or("?", |i| self.funcs[i].name.as_str())
     }
 
-    pub fn show(&mut self, ui: &mut egui::Ui, _b: &Snapshot) {
+    pub fn show(&mut self, ui: &mut egui::Ui, _b: &Snapshot, sm: &SourceMap, focus: &mut Option<Loc>) {
         if self.machine.is_none() {
             widgets::empty(ui, "nothing to run: the build did not produce an image");
             return;
@@ -155,7 +209,7 @@ impl CpuView {
         self.controls(ui);
         ui.add_space(6.0);
         if ui.available_width() < 1050.0 {
-            self.show_stacked(ui);
+            self.show_stacked(ui, sm, focus);
             return;
         }
         let avail = ui.available_height();
@@ -171,7 +225,7 @@ impl CpuView {
             panel(ui, left_w, top_h, |ui| {
                 egui::ScrollArea::vertical().id_salt("cpu-left").show(ui, |ui| self.state_panel(ui));
             });
-            panel(ui, mid_w, top_h, |ui| self.disassembly(ui));
+            panel(ui, mid_w, top_h, |ui| self.disassembly(ui, sm, focus));
             widgets::column(ui, right_w, top_h, |ui| {
                 let h = (top_h - 10.0) / 2.0;
                 panel(ui, right_w, h, |ui| self.console(ui));
@@ -189,7 +243,7 @@ impl CpuView {
     }
 
     // narrow screens: two columns at most, the page scrolls instead of clipping
-    fn show_stacked(&mut self, ui: &mut egui::Ui) {
+    fn show_stacked(&mut self, ui: &mut egui::Ui, sm: &SourceMap, focus: &mut Option<Loc>) {
         egui::ScrollArea::vertical().id_salt("cpu-stacked").auto_shrink([false, false]).show(ui, |ui| {
             let gap = ui.spacing().item_spacing.x + 2.0;
             let full = ui.available_width();
@@ -199,7 +253,7 @@ impl CpuView {
                     panel(ui, 250.0, 460.0, |ui| {
                         egui::ScrollArea::vertical().id_salt("cpu-left").show(ui, |ui| self.state_panel(ui));
                     });
-                    panel(ui, ui.available_width() - 2.0, 460.0, |ui| self.disassembly(ui));
+                    panel(ui, ui.available_width() - 2.0, 460.0, |ui| self.disassembly(ui, sm, focus));
                 });
             } else {
                 // too narrow for registers beside the listing: one above the other
@@ -207,7 +261,7 @@ impl CpuView {
                     egui::ScrollArea::vertical().id_salt("cpu-left").show(ui, |ui| self.state_panel(ui));
                 });
                 ui.add_space(8.0);
-                panel(ui, full, 460.0, |ui| self.disassembly(ui));
+                panel(ui, full, 460.0, |ui| self.disassembly(ui, sm, focus));
             }
             ui.add_space(8.0);
             ui.horizontal_top(|ui| {
@@ -328,58 +382,123 @@ impl CpuView {
         }
     }
 
-    fn disassembly(&mut self, ui: &mut egui::Ui) {
+    fn disassembly(&mut self, ui: &mut egui::Ui, sm: &SourceMap, focus: &mut Option<Loc>) {
         let (start, end) = self.text_range;
-        let n = ((end - start) / 4) as usize;
-        let m = self.machine.as_mut().unwrap();
-        let pc_exec = if m.cpu.phase == Phase::Fetch { m.cpu.pc } else { m.cpu.pc.wrapping_sub(4) };
+        let pc_exec = self.exec_addr().unwrap_or(0);
+        let exec_loc = sm.at(pc_exec).cloned();
+        let has_src = self.src_rows.len() > self.src_row_of.len();
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("memory as instructions (.text)").color(theme::DIM));
             ui.checkbox(&mut self.follow, "follow pc");
-            widgets::caption(ui, "click the gutter to set a breakpoint");
+            if has_src {
+                ui.checkbox(&mut self.interleave, "source lines").on_hover_text("show the line each run of instructions was compiled from, like objdump -S");
+            }
+            widgets::caption(ui, "click a row to follow its line, the gutter to set a breakpoint");
         });
+        let plain: Vec<Row>;
+        let (rows, row_of): (&[Row], Option<&HashMap<u32, usize>>) = if self.interleave && has_src {
+            (&self.src_rows, Some(&self.src_row_of))
+        } else {
+            plain = (start..end).step_by(4).map(Row::Insn).collect();
+            (&plain, None)
+        };
+        let row_index = |a: u32| match row_of {
+            Some(m) => m.get(&a).copied(),
+            None => (a >= start && a < end).then(|| ((a - start) / 4) as usize),
+        };
         let row_h = 17.0;
+        let pitch = row_h + ui.spacing().item_spacing.y;
         let mut area = egui::ScrollArea::vertical().id_salt("disasm").auto_shrink([false, false]);
-        let cur_row = pc_exec.wrapping_sub(start) / 4;
-        if self.follow && (cur_row as usize) < n {
-            let y = cur_row as f32 * (row_h + ui.spacing().item_spacing.y);
-            area = area.vertical_scroll_offset((y - 140.0).max(0.0));
+        // a line followed from another view: show its first instruction
+        let mut jump = None;
+        if *focus != self.seen {
+            if let Some(a) = focus.as_ref().and_then(|l| sm.addrs(l).first().copied()) {
+                jump = row_index(a);
+            }
         }
+        if let Some(j) = jump {
+            area = area.vertical_scroll_offset((j as f32 * pitch - 140.0).max(0.0));
+        } else if self.follow && pc_exec != self.last_pc {
+            if let Some(j) = row_index(pc_exec) {
+                area = area.vertical_scroll_offset((j as f32 * pitch - 140.0).max(0.0));
+            }
+        }
+        self.last_pc = pc_exec;
+        let m = self.machine.as_mut().unwrap();
         let max_heat = m.heat.iter().copied().max().unwrap_or(1).max(1) as f32;
         let mut toggle = None;
+        let mut picked = None;
         let labels = &self.labels;
         let pool = &self.pool_words;
         let funcs = &self.funcs;
-        area.show_rows(ui, row_h, n, |ui, range| {
+        area.show_rows(ui, row_h, rows.len(), |ui, range| {
             for k in range {
-                let a = start + 4 * k as u32;
-                let w = m.bus.peek32(a).unwrap_or(0);
                 let (r, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h), Sense::click());
                 let p = ui.painter();
+                let y = r.center().y;
+                let gutter = Rect::from_min_size(r.min, egui::vec2(16.0, row_h));
+                let in_gutter = resp.interact_pointer_pos().map_or(false, |pp| gutter.contains(pp));
+                let font = theme::mono(12.0);
+                let a = match &rows[k] {
+                    Row::Src(l) => {
+                        // the source line, then the instructions it became
+                        let executing = exec_loc.as_ref() == Some(l);
+                        let followed = focus.as_ref() == Some(l);
+                        if executing {
+                            p.rect_filled(r, CornerRadius::same(3), theme::CPU.gamma_multiply(0.10));
+                        } else if followed {
+                            p.rect_filled(r, CornerRadius::same(3), theme::ACCENT.gamma_multiply(0.10));
+                        } else if resp.hovered() {
+                            p.rect_filled(r, CornerRadius::same(3), theme::RAISED);
+                        }
+                        p.line_segment([egui::pos2(r.left() + 18.0, r.top() + 0.5), egui::pos2(r.right(), r.top() + 0.5)], Stroke::new(1.0, theme::BORDER));
+                        p.text(egui::pos2(r.left() + 58.0, y), Align2::LEFT_CENTER, l.label(), theme::mono(11.0), if followed { theme::ACCENT } else { theme::FAINT });
+                        let code = sm.text(l).trim();
+                        p.text(egui::pos2(r.left() + 184.0, y), Align2::LEFT_CENTER, code, font, if executing || followed { theme::TEXT } else { theme::SOURCE });
+                        if resp.clicked() {
+                            if in_gutter {
+                                // the gutter of a source line breaks on its first instruction
+                                if let Some(Row::Insn(a)) = rows.get(k + 1) {
+                                    toggle = Some(*a);
+                                }
+                            } else {
+                                picked = Some(l.clone());
+                            }
+                        }
+                        continue;
+                    }
+                    Row::Insn(a) => *a,
+                };
+                let w = m.bus.peek32(a).unwrap_or(0);
                 let is_pc = a == pc_exec;
+                let from = sm.at(a);
                 if is_pc {
                     p.rect_filled(r, CornerRadius::same(3), theme::CPU.gamma_multiply(0.2));
                 } else if resp.hovered() {
                     p.rect_filled(r, CornerRadius::same(3), theme::RAISED);
                 }
-                let y = r.center().y;
+                if from.is_some() && from == focus.as_ref() {
+                    p.rect_filled(Rect::from_min_size(r.min + egui::vec2(17.0, 0.0), egui::vec2(2.0, row_h)), 0.0, theme::ACCENT);
+                }
                 let bp = m.breakpoints.contains(&a);
-                let gutter = Rect::from_min_size(r.min, egui::vec2(16.0, row_h));
                 if bp {
                     p.circle_filled(gutter.center(), 4.5, theme::ERR);
                 } else if resp.hovered() && ui.rect_contains_pointer(gutter) {
                     p.circle_stroke(gutter.center(), 4.5, Stroke::new(1.0, theme::ERR.gamma_multiply(0.6)));
                 }
-                if resp.clicked() && resp.interact_pointer_pos().map_or(false, |pp| gutter.contains(pp)) {
-                    toggle = Some(a);
+                if resp.clicked() {
+                    if in_gutter {
+                        toggle = Some(a);
+                    } else if let Some(l) = from {
+                        picked = Some(l.clone());
+                    }
                 }
                 // retire count as a heat bar
                 let h = m.heat.get(((a - SRAM_BASE) / 4) as usize).copied().unwrap_or(0);
                 if h > 0 {
                     let bw = 34.0 * ((h as f32).ln_1p() / max_heat.ln_1p());
-                    p.rect_filled(Rect::from_min_size(egui::pos2(r.left() + 18.0, y - 3.0), egui::vec2(bw.max(1.0), 6.0)), CornerRadius::same(2), theme::WARN.gamma_multiply(0.6));
+                    p.rect_filled(Rect::from_min_size(egui::pos2(r.left() + 20.0, y - 3.0), egui::vec2(bw.max(1.0), 6.0)), CornerRadius::same(2), theme::WARN.gamma_multiply(0.6));
                 }
-                let font = theme::mono(12.0);
                 p.text(egui::pos2(r.left() + 58.0, y), Align2::LEFT_CENTER, format!("{:06x}", a), font.clone(), theme::FAINT);
                 p.text(egui::pos2(r.left() + 112.0, y), Align2::LEFT_CENTER, widgets::hex32(w), font.clone(), theme::DIM);
                 let label = labels.binary_search_by_key(&a, |(x, _)| *x).ok().map(|i| labels[i].1.as_str());
@@ -409,6 +528,10 @@ impl CpuView {
                 m.breakpoints.insert(a);
             }
         }
+        if let Some(l) = picked {
+            *focus = Some(l);
+        }
+        self.seen = focus.clone();
     }
 
     fn console(&mut self, ui: &mut egui::Ui) {

@@ -5,17 +5,20 @@
 use crate::{highlight, theme, widgets};
 use eframe::egui::{self, Align2, Color32, CornerRadius, Rect, RichText, Sense, Stroke, StrokeKind};
 use crate::snapshot::{LineKind, Snapshot, R_ARM_ABS32};
+use crate::srcmap::{Loc, SourceMap};
 use toolchain::disasm;
 
 pub struct AsmView {
     selected: Option<usize>,
     show_runtime: bool,
     jump: Option<usize>,
+    // the followed line this view last jumped to
+    seen: Option<Loc>,
 }
 
 impl Default for AsmView {
     fn default() -> Self {
-        AsmView { selected: None, show_runtime: false, jump: None }
+        AsmView { selected: None, show_runtime: false, jump: None, seen: None }
     }
 }
 
@@ -41,7 +44,7 @@ fn word(bytes: &[u8], off: usize) -> Option<u32> {
 impl AsmView {
     pub fn on_rebuild(&mut self) {}
 
-    pub fn show(&mut self, ui: &mut egui::Ui, b: &Snapshot) {
+    pub fn show(&mut self, ui: &mut egui::Ui, b: &Snapshot, sm: &SourceMap, focus: &mut Option<Loc>) {
         let Some(full) = &b.full_asm else {
             widgets::empty(ui, "no assembly yet: an earlier stage failed");
             return;
@@ -53,8 +56,24 @@ impl AsmView {
                 place[e.line] = Some(Place { sec: &e.sec, off: e.off, len: e.len, kind: e.kind });
             }
         }
+        // a newly followed line: select its first instruction and scroll there
+        let mut target = None;
+        if *focus != self.seen {
+            if let Some(l) = focus.as_ref() {
+                let mine = sm.asm_lines(l);
+                target = mine.iter().copied().find(|&i| place[i].map_or(false, |p| p.kind == LineKind::Insn)).or(mine.first().copied());
+                if target.map_or(false, |t| t < b.asm_line_offset) {
+                    self.show_runtime = true;
+                }
+            }
+        }
         let first = if self.show_runtime { 0 } else { b.asm_line_offset.min(lines.len()) };
         let rows: Vec<Row> = (first..lines.len()).map(|i| Row { line: i, text: lines[i], place: place[i] }).collect();
+        if let Some(t) = target {
+            self.selected = Some(t);
+            // a few rows of context above
+            self.jump = rows.iter().position(|r| r.line == t).map(|j| j.saturating_sub(6));
+        }
 
         widgets::heading(ui, "codegen + assembler", theme::ASM);
         widgets::caption(
@@ -90,7 +109,7 @@ impl AsmView {
             widgets::column(ui, list_w, h, |ui| {
                 widgets::card(ui, |ui| {
                     ui.set_min_size(ui.available_size());
-                    self.listing(ui, b, &rows);
+                    self.listing(ui, b, &rows, sm, focus);
                 });
             });
             widgets::column(ui, detail_w, h, |ui| {
@@ -100,9 +119,11 @@ impl AsmView {
                 });
             });
         });
+        self.seen = focus.clone();
     }
 
-    fn listing(&mut self, ui: &mut egui::Ui, b: &Snapshot, rows: &[Row]) {
+    fn listing(&mut self, ui: &mut egui::Ui, b: &Snapshot, rows: &[Row], sm: &SourceMap, focus: &mut Option<Loc>) {
+        let mut picked = None;
         let row_h = 17.0;
         let mut area = egui::ScrollArea::vertical().id_salt("asm-list").auto_shrink([false, false]);
         if let Some(j) = self.jump.take() {
@@ -117,8 +138,16 @@ impl AsmView {
                 } else if resp.hovered() {
                     ui.painter().rect_filled(r, CornerRadius::same(3), theme::RAISED);
                 }
+                let from = sm.asm_loc(row.line);
+                if from.is_some() && from == focus.as_ref() {
+                    ui.painter().rect_filled(egui::Rect::from_min_size(r.min, egui::vec2(2.0, row_h)), 0.0, theme::ACCENT);
+                    if !selected {
+                        ui.painter().rect_filled(r, CornerRadius::same(3), theme::ACCENT.gamma_multiply(0.08));
+                    }
+                }
                 if resp.clicked() {
                     self.selected = Some(row.line);
+                    picked = from.cloned();
                 }
                 let p = ui.painter();
                 let y = r.center().y;
@@ -147,6 +176,9 @@ impl AsmView {
                 ui.painter().galley(egui::pos2(r.left() + 168.0, y - galley.size().y / 2.0), galley, theme::TEXT);
             }
         });
+        if let Some(l) = picked {
+            *focus = Some(l);
+        }
     }
 
     fn detail(&self, ui: &mut egui::Ui, b: &Snapshot, lines: &[&str], place: &[Option<Place>]) {

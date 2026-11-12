@@ -135,6 +135,12 @@ pub struct Snapshot {
     #[serde(deserialize_with = "opt_hex")]
     pub flat: Option<Vec<u8>>,
     pub base: u32,
+    // source map (c only): which file and line each preprocessed line and
+    // each compiler asm line came from, 0-based
+    pub pre_lines: Vec<Option<(String, usize)>>,
+    pub asm_src: Vec<Option<(String, usize)>>,
+    pub stmts: std::collections::HashMap<String, Vec<String>>,
+    pub sources: std::collections::BTreeMap<String, String>,
     pub error: Option<PyError>,
     pub warnings: Vec<String>,
 }

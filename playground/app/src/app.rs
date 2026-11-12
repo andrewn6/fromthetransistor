@@ -3,6 +3,7 @@
 
 use crate::examples::{Kind, EXAMPLES};
 use crate::snapshot::Snapshot;
+use crate::srcmap::{Loc, SourceMap, RUNTIME};
 use crate::{highlight, python, theme, views, widgets};
 use eframe::egui::{self, Align2, Color32, CornerRadius, RichText, Sense, Stroke};
 use std::sync::Arc;
@@ -86,6 +87,13 @@ pub struct App {
     show_traceback: bool,
     last_edit: f64,
     pub tab: Tab,
+    // the source line being followed through the stages, and where it came from
+    pub srcmap: SourceMap,
+    pub focus: Option<Loc>,
+    editor_line: Option<usize>,
+    scroll_line: Option<Loc>,
+    exec_line: Option<Loc>,
+    pub preprocess: views::preprocess::PreprocessView,
     pub cpu: views::cpu::CpuView,
     pub asm: views::asm::AsmView,
     pub ast: views::ast::AstView,
@@ -120,6 +128,12 @@ impl App {
             show_traceback: false,
             last_edit: 0.0,
             tab: Tab::Cpu,
+            srcmap: SourceMap::default(),
+            focus: None,
+            editor_line: None,
+            scroll_line: None,
+            exec_line: None,
+            preprocess: views::preprocess::PreprocessView::default(),
             cpu: views::cpu::CpuView::default(),
             asm: views::asm::AsmView::default(),
             ast: views::ast::AstView::default(),
@@ -174,7 +188,12 @@ impl App {
         });
         self.build = python::build(&req.to_string());
         self.built_version = self.py.version;
-        self.cpu.load(&self.build);
+        self.srcmap = SourceMap::build(&self.build, &f.name);
+        // keep following the same line across edits while it still exists
+        if self.focus.as_ref().map_or(false, |l| !self.srcmap.has(l)) {
+            self.focus = None;
+        }
+        self.cpu.load(&self.build, &self.srcmap);
         self.asm.on_rebuild();
         self.ast.on_rebuild();
         self.link.on_rebuild();
@@ -183,6 +202,8 @@ impl App {
     fn select(&mut self, i: usize) {
         if i != self.current {
             self.current = i;
+            self.focus = None;
+            self.editor_line = None;
             // each example picks its own run mode; edits keep whatever the user set
             let f = &self.files[i];
             self.cpu.configure(f.semihost, f.uart);
@@ -401,20 +422,128 @@ impl App {
             job.wrap.max_width = wrap_width;
             ui.painter().layout_job(job)
         };
+        let name = self.files[self.current].name.clone();
+        let mine = |l: &Option<Loc>| l.as_ref().filter(|l| l.file == name).map(|l| l.line);
+        let focus_line = mine(&self.focus);
+        // the executing line only shows while the cpu is on screen
+        let exec_line = if self.tab == Tab::Cpu { mine(&self.exec_line) } else { None };
+        let scroll_to = mine(&self.scroll_line.take());
         egui::ScrollArea::both().id_salt("editor").auto_shrink([false, false]).show(ui, |ui| {
             let f = &mut self.files[self.current];
-            let resp = ui.add(
-                egui::TextEdit::multiline(&mut f.text)
-                    .code_editor()
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(40)
-                    .lock_focus(true)
-                    .layouter(&mut layouter),
-            );
-            if resp.changed() {
+            let out = egui::TextEdit::multiline(&mut f.text)
+                .code_editor()
+                .desired_width(f32::INFINITY)
+                .desired_rows(40)
+                .lock_focus(true)
+                .layouter(&mut layouter)
+                .show(ui);
+            if out.response.changed() {
                 self.last_edit = ui.input(|i| i.time);
             }
+            // moving the cursor onto a line follows that line through the stages
+            if out.response.has_focus() {
+                if let Some(c) = out.cursor_range {
+                    let line = f.text.chars().take(c.primary.index.0).filter(|&ch| ch == '\n').count();
+                    if self.editor_line != Some(line) {
+                        self.editor_line = Some(line);
+                        self.focus = Some(Loc::new(&name, line));
+                    }
+                }
+            }
+            let row = |line: usize| {
+                let start = f.text.split('\n').take(line).map(|l| l.chars().count() + 1).sum::<usize>();
+                let r = out.galley.pos_from_cursor(egui::text::CCursor::new(start)).translate(out.galley_pos.to_vec2());
+                egui::Rect::from_x_y_ranges(out.text_clip_rect.x_range(), r.y_range())
+            };
+            let p = ui.painter();
+            if let Some(l) = focus_line {
+                p.rect_filled(row(l), 0.0, theme::ACCENT.gamma_multiply(0.10));
+            }
+            if let Some(l) = scroll_to {
+                ui.scroll_to_rect(row(l), Some(egui::Align::Center));
+            }
+            if let Some(l) = exec_line {
+                let r = row(l);
+                p.rect_filled(r, 0.0, theme::CPU.gamma_multiply(0.14));
+                p.rect_filled(egui::Rect::from_min_size(r.min, egui::vec2(2.0, r.height())), 0.0, theme::CPU);
+            }
         });
+    }
+
+    // ----- lineage: one source line through every stage -----
+
+    fn lineage(&mut self, ui: &mut egui::Ui) {
+        let frame = egui::Frame::NONE
+            .fill(theme::PANEL)
+            .stroke(Stroke::new(1.0, theme::BORDER))
+            .corner_radius(CornerRadius::same(4))
+            .inner_margin(egui::Margin::symmetric(10, 6));
+        let Some(l) = self.focus.clone() else {
+            // same height as the strip, so picking a line moves nothing
+            frame.show(ui, |ui| {
+                let w = ui.available_width();
+                ui.allocate_ui_with_layout(egui::vec2(w, 32.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.set_min_size(egui::vec2(w, 32.0));
+                    ui.label(RichText::new("follow a line").color(theme::DIM).size(12.5));
+                    widgets::caption(ui, "click a line in the editor, the listing or the disassembly to see what every stage turned it into.");
+                });
+            });
+            ui.add_space(8.0);
+            return;
+        };
+        let sm = &self.srcmap;
+        let b = &self.build;
+        let tab = self.tab;
+        let mut go = None;
+        let mut clear = false;
+        let mut step = |ui: &mut egui::Ui, first: bool, color: Color32, title: &str, detail: &str, to: Option<Tab>| {
+            if !first {
+                ui.label(RichText::new(">").color(theme::FAINT));
+            }
+            if widgets::step_chip(ui, color, title, detail, to.is_some() && to == Some(tab)).clicked() {
+                go = to;
+            }
+        };
+        frame.show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                // one row that scrolls sideways, so the views below never move
+                egui::ScrollArea::horizontal().id_salt("lineage").show(ui, |ui| ui.horizontal(|ui| {
+                    let full = sm.text(&l).trim();
+                    let code: String = if full.chars().count() > 24 { format!("{}...", full.chars().take(22).collect::<String>()) } else { full.to_string() };
+                    let title = if l.file == RUNTIME { "runtime asm" } else { "source" };
+                    step(ui, true, theme::SOURCE, title, &format!("{}  {}", l.label(), code), None);
+                    let c_line = b.kind == "c" && l.file != RUNTIME;
+                    if c_line {
+                        let pre = sm.pre_lines(&l);
+                        let detail = pre.first().map_or("dropped".to_string(), |p| format!("line {}", p + 1));
+                        step(ui, false, theme::SOURCE, "preprocess", &detail, Some(Tab::Preprocess));
+                        let toks = b.tokens.as_ref().map_or(0, |t| t.iter().filter(|t| t.start.map_or(false, |s| pre.contains(&sm.pre_line_of(s)))).count());
+                        step(ui, false, theme::TOKENS, "lex", &format!("{} tokens", toks), Some(Tab::Tokens));
+                        let stmts = b.stmts.get(&format!("{}:{}", l.file, l.line)).map_or("no statement".to_string(), |v| v.join(", "));
+                        step(ui, false, theme::AST, "parse", &stmts, Some(Tab::Ast));
+                    }
+                    let asm = sm.asm_lines(&l);
+                    let addrs = sm.addrs(&l);
+                    let title = if c_line { "codegen" } else { "assemble" };
+                    step(ui, false, theme::ASM, title, &format!("{} asm lines", asm.len()), Some(Tab::Asm));
+                    let placed = addrs.first().map_or("no code".to_string(), |a| format!("{} instrs at 0x{:x}", addrs.len(), a));
+                    step(ui, false, theme::LINK, "link", &placed, Some(Tab::Link));
+                    let ran = addrs.iter().map(|&a| self.cpu.heat(a)).max().unwrap_or(0);
+                    let now = if self.exec_line.as_ref() == Some(&l) { "here now, " } else { "" };
+                    step(ui, false, theme::CPU, "arm7 cpu", &format!("{}ran {}x", now, ran), Some(Tab::Cpu));
+                    if ui.small_button("x").on_hover_text("stop following this line").clicked() {
+                        clear = true;
+                    }
+                }));
+            });
+        ui.add_space(8.0);
+        if let Some(t) = go {
+            self.tab = t;
+        }
+        if clear {
+            self.focus = None;
+            self.editor_line = None;
+        }
     }
 }
 
@@ -493,6 +622,12 @@ impl eframe::App for App {
             }
         }
         self.cpu.tick(ui.ctx());
+        // which source line the cpu is in; a single step scrolls the editor to it
+        let exec = self.cpu.exec_addr().and_then(|a| self.srcmap.at(a).cloned());
+        if exec != self.exec_line && !self.cpu.is_running() && self.tab == Tab::Cpu {
+            self.scroll_line = exec.clone();
+        }
+        self.exec_line = exec;
         // the board runs whichever page is open, like real hardware
         self.board.refresh_roms(&self.py);
         self.board.tick(ui.ctx());
@@ -523,18 +658,27 @@ impl eframe::App for App {
             .frame(egui::Frame::NONE.fill(theme::BG).inner_margin(egui::Margin::same(16)))
             .show(ui, |ui| {
                 self.error_banner(ui);
+                if self.tab != Tab::Board {
+                    self.lineage(ui);
+                }
+                let before = self.focus.clone();
+                let (b, sm, focus) = (&self.build, &self.srcmap, &mut self.focus);
                 match self.tab {
-                    Tab::Preprocess => views::preprocess::show(ui, &self.build),
-                    Tab::Tokens => self.tokens.show(ui, &self.build),
-                    Tab::Ast => self.ast.show(ui, &self.build),
-                    Tab::Asm => self.asm.show(ui, &self.build),
-                    Tab::Link => self.link.show(ui, &self.build),
-                    Tab::Elf => self.elf.show(ui, &self.build),
-                    Tab::Cpu => self.cpu.show(ui, &self.build),
+                    Tab::Preprocess => self.preprocess.show(ui, b, sm, focus),
+                    Tab::Tokens => self.tokens.show(ui, b, sm, focus),
+                    Tab::Ast => self.ast.show(ui, b),
+                    Tab::Asm => self.asm.show(ui, b, sm, focus),
+                    Tab::Link => self.link.show(ui, b),
+                    Tab::Elf => self.elf.show(ui, b),
+                    Tab::Cpu => self.cpu.show(ui, b, sm, focus),
                     Tab::Board => {
                         let name = self.files[self.current].name.clone();
                         self.board.show(ui, &self.build, &name)
                     }
+                }
+                // a line picked in a view scrolls the editor to it
+                if self.focus != before {
+                    self.scroll_line = self.focus.clone();
                 }
             });
     }

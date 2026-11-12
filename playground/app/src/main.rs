@@ -6,6 +6,7 @@ mod examples;
 mod highlight;
 mod python;
 mod snapshot;
+mod srcmap;
 mod theme;
 mod views;
 mod widgets;

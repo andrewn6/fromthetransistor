@@ -68,3 +68,19 @@ pub fn column<R>(ui: &mut egui::Ui, w: f32, h: f32, add: impl FnOnce(&mut egui::
     })
     .inner
 }
+
+// one stage of the lineage strip: a small title over a monospace detail
+pub fn step_chip(ui: &mut egui::Ui, color: Color32, title: &str, detail: &str, selected: bool) -> egui::Response {
+    let t = ui.painter().layout_no_wrap(title.to_string(), egui::FontId::proportional(10.5), color);
+    let d = ui.painter().layout_no_wrap(detail.to_string(), theme::mono(11.0), theme::TEXT);
+    let size = egui::vec2(t.size().x.max(d.size().x) + 14.0, t.size().y + d.size().y + 8.0);
+    let (r, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    let fill = if selected { color.gamma_multiply(0.16) } else if resp.hovered() { theme::RAISED } else { theme::BG };
+    let stroke = Stroke::new(1.0, if selected { color.gamma_multiply(0.8) } else { theme::BORDER });
+    ui.painter().rect(r, CornerRadius::same(3), fill, stroke, StrokeKind::Inside);
+    let top = r.left_top() + egui::vec2(7.0, 4.0);
+    let dy = t.size().y;
+    ui.painter().galley(top, t, color);
+    ui.painter().galley(top + egui::vec2(0.0, dy), d, theme::TEXT);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
