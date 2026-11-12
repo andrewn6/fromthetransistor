@@ -154,6 +154,10 @@ impl CpuView {
         }
         self.controls(ui);
         ui.add_space(6.0);
+        if ui.available_width() < 1050.0 {
+            self.show_stacked(ui);
+            return;
+        }
         let avail = ui.available_height();
         let bottom_h = 190.0;
         let top_h = (avail - bottom_h - 10.0).max(300.0);
@@ -164,48 +168,56 @@ impl CpuView {
             let left_w = (total * 0.28).clamp(240.0, 300.0);
             let right_w = (total * 0.32).clamp(260.0, 380.0);
             let mid_w = (ui.available_width() - left_w - right_w - 20.0).max(260.0);
-            widgets::column(ui, left_w, top_h, |ui| {
-                widgets::card(ui, |ui| {
-                    ui.set_min_size(egui::vec2(left_w - 22.0, top_h - 22.0));
-                    egui::ScrollArea::vertical().id_salt("cpu-left").show(ui, |ui| self.state_panel(ui));
-                });
+            panel(ui, left_w, top_h, |ui| {
+                egui::ScrollArea::vertical().id_salt("cpu-left").show(ui, |ui| self.state_panel(ui));
             });
-            widgets::column(ui, mid_w, top_h, |ui| {
-                widgets::card(ui, |ui| {
-                    ui.set_min_size(egui::vec2(mid_w - 22.0, top_h - 22.0));
-                    self.disassembly(ui);
-                });
-            });
+            panel(ui, mid_w, top_h, |ui| self.disassembly(ui));
             widgets::column(ui, right_w, top_h, |ui| {
                 let h = (top_h - 10.0) / 2.0;
-                widgets::card(ui, |ui| {
-                    ui.set_min_size(egui::vec2(right_w - 22.0, h - 22.0));
-                    ui.set_max_height(h - 22.0);
-                    self.console(ui);
-                });
+                panel(ui, right_w, h, |ui| self.console(ui));
                 ui.add_space(6.0);
-                widgets::card(ui, |ui| {
-                    ui.set_min_size(egui::vec2(right_w - 22.0, h - 26.0));
-                    self.memory(ui);
-                });
+                panel(ui, right_w, h - 4.0, |ui| self.memory(ui));
             });
         });
         ui.add_space(8.0);
         ui.horizontal_top(|ui| {
             let hot_w = 300.0;
             let tl_w = ui.available_width() - hot_w - 10.0;
-            widgets::column(ui, tl_w, bottom_h, |ui| {
-                widgets::card(ui, |ui| {
-                    ui.set_min_size(egui::vec2(tl_w - 22.0, bottom_h - 22.0));
-                    self.timeline(ui);
+            panel(ui, tl_w, bottom_h, |ui| self.timeline(ui));
+            panel(ui, hot_w, bottom_h, |ui| self.hot(ui));
+        });
+    }
+
+    // narrow screens: two columns at most, the page scrolls instead of clipping
+    fn show_stacked(&mut self, ui: &mut egui::Ui) {
+        egui::ScrollArea::vertical().id_salt("cpu-stacked").auto_shrink([false, false]).show(ui, |ui| {
+            let gap = ui.spacing().item_spacing.x + 2.0;
+            let full = ui.available_width();
+            let half = (full - gap) / 2.0;
+            if full >= 760.0 {
+                ui.horizontal_top(|ui| {
+                    panel(ui, 250.0, 460.0, |ui| {
+                        egui::ScrollArea::vertical().id_salt("cpu-left").show(ui, |ui| self.state_panel(ui));
+                    });
+                    panel(ui, ui.available_width() - 2.0, 460.0, |ui| self.disassembly(ui));
                 });
-            });
-            widgets::column(ui, hot_w, bottom_h, |ui| {
-                widgets::card(ui, |ui| {
-                    ui.set_min_size(egui::vec2(hot_w - 22.0, bottom_h - 22.0));
-                    self.hot(ui);
+            } else {
+                // too narrow for registers beside the listing: one above the other
+                panel(ui, full, 460.0, |ui| {
+                    egui::ScrollArea::vertical().id_salt("cpu-left").show(ui, |ui| self.state_panel(ui));
                 });
+                ui.add_space(8.0);
+                panel(ui, full, 460.0, |ui| self.disassembly(ui));
+            }
+            ui.add_space(8.0);
+            ui.horizontal_top(|ui| {
+                panel(ui, half, 260.0, |ui| self.console(ui));
+                panel(ui, half, 260.0, |ui| self.memory(ui));
             });
+            ui.add_space(8.0);
+            panel(ui, full, 190.0, |ui| self.timeline(ui));
+            ui.add_space(8.0);
+            panel(ui, full, 190.0, |ui| self.hot(ui));
         });
     }
 
@@ -246,7 +258,7 @@ impl CpuView {
             }
         });
         let m = self.machine.as_ref().unwrap();
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let (text, col) = match &m.status {
                 Status::Running if self.running => ("running".to_string(), theme::OK),
                 Status::Running => ("paused".to_string(), theme::WARN),
@@ -257,10 +269,15 @@ impl CpuView {
             };
             widgets::pill(ui, &text, col);
             let cpi = if m.retired > 0 { m.cycles as f32 / m.retired as f32 } else { 0.0 };
-            ui.label(RichText::new(format!(
-                "{} cycles   {} instructions   {:.2} cycles/instr   fetch {}  exec {}  block {}",
-                m.cycles, m.retired, cpi, m.phase_cycles[0], m.phase_cycles[1], m.phase_cycles[2]
-            )).monospace().color(theme::DIM));
+            // separate labels so the line wraps on narrow screens
+            for stat in [
+                format!("{} cycles", m.cycles),
+                format!("{} instructions", m.retired),
+                format!("{:.2} cycles/instr", cpi),
+                format!("fetch {}  exec {}  block {}", m.phase_cycles[0], m.phase_cycles[1], m.phase_cycles[2]),
+            ] {
+                ui.label(RichText::new(stat).monospace().color(theme::DIM));
+            }
         });
     }
 
@@ -541,6 +558,17 @@ impl CpuView {
             widgets::caption(ui, "nothing retired yet");
         }
     }
+}
+
+// a card of a fixed outer size
+fn panel(ui: &mut egui::Ui, w: f32, h: f32, add: impl FnOnce(&mut egui::Ui)) {
+    widgets::column(ui, w, h, |ui| {
+        widgets::card(ui, |ui| {
+            ui.set_min_size(egui::vec2(w - 22.0, h - 22.0));
+            ui.set_max_height(h - 22.0);
+            add(ui);
+        });
+    });
 }
 
 // FETCH -> EXEC -> (BLOCK ->) FETCH, current phase lit
