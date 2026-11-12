@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>toolchain playground</title>
+    <link data-trunk rel="rust" data-bin="playground" data-wasm-opt="z" />
+    <style>
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #0d1014; }
+      canvas { display: block; width: 100%; height: 100%; }
+      #loading { position: absolute; inset: 0; display: grid; place-items: center;
+                 color: #7c8797; font: 14px ui-monospace, Menlo, monospace; }
+    </style>
+  </head>
+  <body>
+    <canvas id="playground"></canvas>
+    <div id="loading"><p>loading the toolchain...</p></div>
+  </body>
+</html>

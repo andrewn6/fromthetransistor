@@ -204,16 +204,17 @@ impl Machine {
         }
     }
 
-    // cpu_tb.cpp: load the flat image at `entry`, plant `b entry` at the
-    // reset vector, then one clock edge under reset
-    pub fn load(&mut self, image: &[u8], entry: u32) -> Result<(), String> {
+    // cpu_tb.cpp: load the flat image at `base`, plant `b entry` at the
+    // reset vector, then one clock edge under reset. the testbench uses
+    // one address for both; build.py programs have _start at the base.
+    pub fn load(&mut self, image: &[u8], base: u32, entry: u32) -> Result<(), String> {
         let end = SRAM_BASE + SRAM_SIZE;
-        if !(entry >= SRAM_BASE && entry + 4 <= end) {
-            return Err(format!("FATAL: unmapped image access at 0x{:08x}", entry));
+        if !(base >= SRAM_BASE && base + 4 <= end) {
+            return Err(format!("FATAL: unmapped image access at 0x{:08x}", base));
         }
-        let n = image.len().min((end - entry) as usize);
+        let n = image.len().min((end - base) as usize);
         for (i, b) in image[..n].iter().enumerate() {
-            self.bus.ram(entry + i as u32, 1).unwrap()[0] = *b;
+            self.bus.ram(base + i as u32, 1).unwrap()[0] = *b;
         }
         let off = entry.wrapping_sub(0x10000 + 8) >> 2;
         self.bus.poke32(0x10000, 0xEA00_0000 | (off & 0xFF_FFFF));

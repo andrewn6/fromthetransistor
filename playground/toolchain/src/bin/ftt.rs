@@ -88,7 +88,7 @@ fn main() {
             let entry = u32::from_str_radix(args[3].trim_start_matches("0x"), 16).unwrap_or_else(|e| die(e));
             let mut m = Machine::new();
             m.semihosting = args.iter().any(|a| a == "--semihost");
-            m.load(&img, entry).unwrap_or_else(|e| die(e));
+            m.load(&img, entry, entry).unwrap_or_else(|e| die(e));
             println!("loaded {} bytes at 0x{:08x}, entry 0x{:08x}", img.len(), entry, entry);
             m.run(20_000_000);
             print!("{}", m.console);
