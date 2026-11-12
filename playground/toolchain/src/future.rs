@@ -1,6 +1,6 @@
 // scaffolding for the parts of the course that are not built yet. each
 // piece is wired into the emulator at the spot where the real thing will
-// plug in, but does nothing interesting today. the roadmap view lists them.
+// plug in, but does nothing interesting today.
 
 use crate::machine::Device;
 use std::fmt;

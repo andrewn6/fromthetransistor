@@ -159,8 +159,10 @@ impl CpuView {
         let top_h = (avail - bottom_h - 10.0).max(300.0);
         ui.horizontal_top(|ui| {
             ui.set_height(top_h);
-            let left_w = 300.0;
-            let right_w = 380.0;
+            // the side columns give up width first when the view is narrow
+            let total = ui.available_width();
+            let left_w = (total * 0.28).clamp(240.0, 300.0);
+            let right_w = (total * 0.32).clamp(260.0, 380.0);
             let mid_w = (ui.available_width() - left_w - right_w - 20.0).max(260.0);
             widgets::column(ui, left_w, top_h, |ui| {
                 widgets::card(ui, |ui| {
@@ -314,7 +316,7 @@ impl CpuView {
         let n = ((end - start) / 4) as usize;
         let m = self.machine.as_mut().unwrap();
         let pc_exec = if m.cpu.phase == Phase::Fetch { m.cpu.pc } else { m.cpu.pc.wrapping_sub(4) };
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("memory as instructions (.text)").color(theme::DIM));
             ui.checkbox(&mut self.follow, "follow pc");
             widgets::caption(ui, "click the gutter to set a breakpoint");
@@ -538,19 +540,6 @@ impl CpuView {
         if per.is_empty() {
             widgets::caption(ui, "nothing retired yet");
         }
-    }
-
-    pub fn device_map(&self) -> Vec<(String, u32, u32)> {
-        let mut v = vec![
-            ("sram".to_string(), SRAM_BASE, SRAM_SIZE),
-            ("stack page".to_string(), toolchain::machine::STK_BASE, toolchain::machine::STK_SIZE),
-        ];
-        if let Some(m) = &self.machine {
-            for d in &m.bus.devices {
-                v.push((d.name().to_string(), d.base(), d.size()));
-            }
-        }
-        v
     }
 }
 

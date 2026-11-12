@@ -11,5 +11,4 @@ pub mod linker;
 pub mod machine;
 pub mod pipeline;
 pub mod py;
-pub mod roadmap;
 pub mod runtime;

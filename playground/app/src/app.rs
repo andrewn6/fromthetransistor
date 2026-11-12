@@ -4,7 +4,7 @@
 use crate::examples::{Kind, EXAMPLES};
 use crate::snapshot::Snapshot;
 use crate::{highlight, python, theme, views, widgets};
-use eframe::egui::{self, Align2, Color32, CornerRadius, RichText, Sense, Stroke, StrokeKind};
+use eframe::egui::{self, Align2, Color32, CornerRadius, RichText, Sense, Stroke};
 use std::sync::Arc;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -16,11 +16,10 @@ pub enum Tab {
     Link,
     Elf,
     Cpu,
-    Roadmap,
 }
 
 impl Tab {
-    const ALL: [Tab; 8] = [Tab::Preprocess, Tab::Tokens, Tab::Ast, Tab::Asm, Tab::Link, Tab::Elf, Tab::Cpu, Tab::Roadmap];
+    const ALL: [Tab; 7] = [Tab::Preprocess, Tab::Tokens, Tab::Ast, Tab::Asm, Tab::Link, Tab::Elf, Tab::Cpu];
 
     fn slug(self) -> &'static str {
         match self {
@@ -31,7 +30,6 @@ impl Tab {
             Tab::Link => "link",
             Tab::Elf => "elf",
             Tab::Cpu => "cpu",
-            Tab::Roadmap => "roadmap",
         }
     }
 
@@ -188,22 +186,27 @@ impl App {
         }
     }
 
-    // ----- top bar -----
+    // ----- header -----
 
-    fn top_bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("from the transistor").strong().size(17.0));
+    fn header(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_centered(|ui| {
+            ui.label(RichText::new("from the transistor").strong().size(15.0));
+            ui.label(RichText::new("/").color(theme::FAINT).size(15.0));
             ui.label(RichText::new("toolchain playground").color(theme::DIM).size(15.0));
-            ui.add_space(16.0);
+            ui.add_space(24.0);
+            ui.label(RichText::new("program").color(theme::DIM));
             let mut pick = None;
-            for (i, f) in self.files.iter().enumerate() {
-                let edited = f.text != f.original;
-                let label = if edited { format!("{} *", f.name) } else { f.name.clone() };
-                let r = ui.selectable_label(i == self.current, RichText::new(label).monospace()).on_hover_text(f.about);
-                if r.clicked() {
-                    pick = Some(i);
-                }
-            }
+            let label = |f: &SourceFile| if f.text != f.original { format!("{}  (edited)", f.name) } else { f.name.clone() };
+            egui::ComboBox::from_id_salt("program")
+                .width(200.0)
+                .selected_text(RichText::new(label(self.file())).monospace())
+                .show_ui(ui, |ui| {
+                    for (i, f) in self.files.iter().enumerate() {
+                        if ui.selectable_label(i == self.current, RichText::new(label(f)).monospace()).on_hover_text(f.about).clicked() {
+                            pick = Some(i);
+                        }
+                    }
+                });
             if let Some(i) = pick {
                 self.select(i);
             }
@@ -213,26 +216,21 @@ impl App {
                 }
                 let col = if self.py.ready { theme::OK } else if self.py.status.starts_with("failed") || self.py.status.starts_with("pyodide failed") { theme::ERR } else { theme::WARN };
                 let files = if self.py.files.is_empty() { "nothing loaded yet".to_string() } else { self.py.files.join("\n") };
-                widgets::pill(ui, &self.py.status, col).on_hover_text(format!("the toolchain running in this page:\n{}", files));
+                let resp = ui.label(RichText::new(&self.py.status).color(theme::DIM).size(12.5)).on_hover_text(format!("the toolchain running in this page:\n{}", files));
+                let dot = egui::pos2(resp.rect.left() - 8.0, resp.rect.center().y);
+                ui.painter().circle_filled(dot, 3.5, col);
+                ui.add_space(10.0);
             });
         });
     }
 
-    // ----- pipeline strip -----
+    // ----- stage sidebar -----
 
-    fn pipeline(&mut self, ui: &mut egui::Ui) {
+    fn stages(&self) -> Vec<Stage> {
         let b = &self.build;
         let is_c = self.file().kind == Kind::C;
         let err_stage = b.error.as_ref().map(|e| e.stage.as_str());
         let failed = |stages: &[&str]| err_stage.map_or(false, |s| stages.contains(&s));
-
-        struct Node {
-            tab: Tab,
-            title: &'static str,
-            metric: String,
-            color: Color32,
-            state: NodeState,
-        }
         let state = |done: bool, fail: bool, applicable: bool| {
             if !applicable {
                 NodeState::NotApplicable
@@ -244,120 +242,89 @@ impl App {
                 NodeState::Skipped
             }
         };
-
-        let insns = b.insn_count();
         let assembled = b.text.is_some();
-        let cpu_metric = self.cpu.metric();
-        let nodes = vec![
-            Node {
+        vec![
+            Stage {
                 tab: Tab::Preprocess,
                 title: "preprocess",
                 metric: b.preprocessed.as_ref().map_or("-".into(), |p| format!("{} lines", p.lines().count())),
                 color: theme::SOURCE,
                 state: state(b.preprocessed.is_some(), failed(&["preprocess", "import"]), is_c),
             },
-            Node {
+            Stage {
                 tab: Tab::Tokens,
                 title: "lex",
                 metric: b.tokens.as_ref().map_or("-".into(), |t| format!("{} tokens", t.len())),
                 color: theme::TOKENS,
                 state: state(b.tokens.is_some(), failed(&["lex"]), is_c),
             },
-            Node {
+            Stage {
                 tab: Tab::Ast,
                 title: "parse",
                 metric: b.ast.as_ref().map_or("-".into(), |a| format!("{} decls", a.len())),
                 color: theme::AST,
                 state: state(b.ast.is_some(), failed(&["parse"]), is_c),
             },
-            Node {
+            Stage {
                 tab: Tab::Asm,
                 title: "codegen + assemble",
-                metric: if assembled { format!("{} instrs", insns) } else { "-".into() },
+                metric: if assembled { format!("{} instrs", b.insn_count()) } else { "-".into() },
                 color: theme::ASM,
                 state: state(assembled && !failed(&["assemble"]), failed(&["codegen", "assemble"]), true),
             },
-            Node {
+            Stage {
                 tab: Tab::Link,
                 title: "link",
                 metric: b.link.as_ref().map_or("-".into(), |l| format!("{} syms, {} relocs", l.symbols.len(), l.patches.len())),
                 color: theme::LINK,
                 state: state(b.elf.is_some(), failed(&["link"]), true),
             },
-            Node {
+            Stage {
                 tab: Tab::Elf,
                 title: "elf",
                 metric: b.elf.as_ref().map_or("-".into(), |e| widgets::bytes(e.len())),
                 color: theme::ELF,
                 state: state(b.elf.is_some(), failed(&["build.py", "bridge"]), true),
             },
-            Node {
+            Stage {
                 tab: Tab::Cpu,
                 title: "arm7 cpu",
-                metric: cpu_metric,
+                metric: self.cpu.metric(),
                 color: theme::CPU,
                 state: state(b.flat.is_some(), false, true),
             },
-        ];
+        ]
+    }
 
-        let height = 64.0;
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), Sense::hover());
-        let painter = ui.painter_at(rect);
-        let ghost_w = 210.0;
-        let gap = 18.0;
-        let n = nodes.len() as f32;
-        let w = ((rect.width() - ghost_w - gap * n) / n).max(80.0);
-        let mut x = rect.left();
-        for (i, node) in nodes.iter().enumerate() {
-            let r = egui::Rect::from_min_size(egui::pos2(x, rect.top() + 4.0), egui::vec2(w, height - 8.0));
-            let resp = ui.interact(r, ui.scope_id().with(("stage", i)), Sense::click());
-            let selected = self.tab == node.tab;
-            let (fg, border) = match node.state {
-                NodeState::Done => (theme::TEXT, node.color.gamma_multiply(0.6)),
-                NodeState::Failed => (theme::ERR, theme::ERR),
-                NodeState::Skipped => (theme::FAINT, theme::BORDER),
-                NodeState::NotApplicable => (theme::FAINT, theme::BORDER),
-            };
-            let fill = if selected {
-                node.color.gamma_multiply(0.16)
-            } else if resp.hovered() {
-                theme::RAISED
-            } else {
-                theme::PANEL
-            };
-            painter.rect(r, CornerRadius::same(6), fill, Stroke::new(if selected { 1.5 } else { 1.0 }, if selected { node.color } else { border }), StrokeKind::Inside);
-            painter.rect_filled(
-                egui::Rect::from_min_size(r.left_top() + egui::vec2(0.0, 6.0), egui::vec2(3.0, r.height() - 12.0)),
-                CornerRadius::same(1),
-                if node.state == NodeState::Done || node.state == NodeState::Failed { if node.state == NodeState::Failed { theme::ERR } else { node.color } } else { theme::FAINT },
-            );
-            painter.text(r.left_top() + egui::vec2(12.0, 9.0), Align2::LEFT_TOP, node.title, egui::FontId::proportional(13.5), fg);
-            let metric = match node.state {
+    fn sidebar(&mut self, ui: &mut egui::Ui) {
+        let stages = self.stages();
+        section_label(ui, "pipeline");
+        let row_h = 46.0;
+        let mut centers = Vec::new();
+        for (i, st) in stages.iter().enumerate() {
+            let metric = match st.state {
                 NodeState::Failed => "failed".to_string(),
                 NodeState::NotApplicable => "n/a for .s".to_string(),
-                _ => node.metric.clone(),
+                _ => st.metric.clone(),
             };
-            painter.text(r.left_bottom() + egui::vec2(12.0, -9.0), Align2::LEFT_BOTTOM, metric, theme::mono(11.5), if node.state == NodeState::Done { theme::DIM } else { fg });
+            let (resp, c) = nav_row(ui, row_h, self.tab == st.tab, st.title, &metric, |p, c| {
+                // step marker: number in a ring, filled once the stage has run
+                let (ring, fill, num) = match st.state {
+                    NodeState::Done => (st.color, st.color.gamma_multiply(0.18), theme::TEXT),
+                    NodeState::Failed => (theme::ERR, theme::ERR.gamma_multiply(0.18), theme::ERR),
+                    _ => (theme::BORDER, Color32::TRANSPARENT, theme::FAINT),
+                };
+                p.circle(c, 10.0, fill, Stroke::new(1.5, ring));
+                p.text(c, Align2::CENTER_CENTER, (i + 1).to_string(), egui::FontId::proportional(11.5), num);
+            }, st.state == NodeState::Failed);
+            centers.push(c);
             if resp.clicked() {
-                self.tab = node.tab;
+                self.tab = st.tab;
             }
-            x += w;
-            // arrow to the next node
-            let y = r.center().y;
-            let a = egui::pos2(x + 3.0, y);
-            painter.arrow(a, egui::vec2(gap - 6.0, 0.0), Stroke::new(1.2, theme::FAINT));
-            x += gap;
         }
-        // what comes after the cpu, per the outline
-        let r = egui::Rect::from_min_size(egui::pos2(x, rect.top() + 4.0), egui::vec2(ghost_w - 4.0, height - 8.0));
-        let resp = ui.interact(r, ui.scope_id().with("roadmap"), Sense::click());
-        let selected = self.tab == Tab::Roadmap;
-        let stroke = Stroke::new(1.0, if selected || resp.hovered() { theme::DIM } else { theme::BORDER });
-        dashed_rect(&painter, r, stroke);
-        painter.text(r.left_top() + egui::vec2(12.0, 9.0), Align2::LEFT_TOP, "next in the course", egui::FontId::proportional(13.5), theme::DIM);
-        painter.text(r.left_bottom() + egui::vec2(12.0, -9.0), Align2::LEFT_BOTTOM, "bootloader > os > browser", theme::mono(11.5), theme::FAINT);
-        if resp.clicked() {
-            self.tab = Tab::Roadmap;
+        // connector between the step markers
+        for w in centers.windows(2) {
+            ui.painter().line_segment([w[0] + egui::vec2(0.0, 11.0), w[1] - egui::vec2(0.0, 11.0)], Stroke::new(1.0, theme::FAINT.gamma_multiply(0.6)));
         }
     }
 
@@ -430,6 +397,14 @@ impl App {
     }
 }
 
+struct Stage {
+    tab: Tab,
+    title: &'static str,
+    metric: String,
+    color: Color32,
+    state: NodeState,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum NodeState {
     Done,
@@ -438,24 +413,43 @@ enum NodeState {
     NotApplicable,
 }
 
+fn section_label(ui: &mut egui::Ui, text: &str) {
+    ui.add_space(4.0);
+    ui.label(RichText::new(text.to_uppercase()).size(11.0).color(theme::FAINT).extra_letter_spacing(0.8));
+    ui.add_space(2.0);
+}
+
+// one sidebar entry: a marker, a title and a one-line detail. the selected
+// entry gets a raised fill and an accent bar. returns the marker center.
+fn nav_row(ui: &mut egui::Ui, h: f32, selected: bool, title: &str, detail: &str, marker: impl FnOnce(&egui::Painter, egui::Pos2), failed: bool) -> (egui::Response, egui::Pos2) {
+    let (r, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), h), Sense::click());
+    let p = ui.painter();
+    if selected || resp.hovered() {
+        p.rect_filled(r, CornerRadius::same(4), if selected { theme::RAISED } else { theme::RAISED.gamma_multiply(0.6) });
+    }
+    if selected {
+        p.rect_filled(egui::Rect::from_min_size(r.left_top() + egui::vec2(0.0, 8.0), egui::vec2(2.0, h - 16.0)), CornerRadius::same(1), theme::ACCENT);
+    }
+    let c = egui::pos2(r.left() + 22.0, r.center().y);
+    marker(p, c);
+    let fg = if failed { theme::ERR } else if selected { theme::TEXT } else { theme::TEXT.gamma_multiply(0.85) };
+    p.text(egui::pos2(r.left() + 42.0, r.center().y - 1.0), Align2::LEFT_BOTTOM, title, egui::FontId::proportional(13.5), fg);
+    p.text(egui::pos2(r.left() + 42.0, r.center().y + 2.0), Align2::LEFT_TOP, detail, theme::mono(11.0), theme::DIM);
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    (resp, c)
+}
+
 fn banner(ui: &mut egui::Ui, color: Color32, add: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::NONE
         .fill(color.gamma_multiply(0.12))
         .stroke(Stroke::new(1.0, color.gamma_multiply(0.6)))
-        .corner_radius(CornerRadius::same(6))
+        .corner_radius(CornerRadius::same(4))
         .inner_margin(egui::Margin::symmetric(10, 6))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             add(ui);
         });
     ui.add_space(6.0);
-}
-
-fn dashed_rect(p: &egui::Painter, r: egui::Rect, stroke: Stroke) {
-    let pts = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()];
-    for w in pts.windows(2) {
-        p.add(egui::Shape::dashed_line(&[w[0], w[1]], stroke, 5.0, 4.0));
-    }
 }
 
 impl eframe::App for App {
@@ -480,22 +474,26 @@ impl eframe::App for App {
         self.cpu.tick(ui.ctx());
         set_location_hash(&self.link());
 
-        egui::Panel::top("top")
-            .frame(egui::Frame::NONE.fill(theme::BG).inner_margin(egui::Margin::symmetric(14, 10)))
-            .show(ui, |ui| {
-                self.top_bar(ui);
-                ui.add_space(8.0);
-                self.pipeline(ui);
-            });
+        let edge = Stroke::new(1.0, theme::BORDER);
+        egui::Panel::top("header")
+            .exact_size(48.0)
+            .frame(egui::Frame::NONE.fill(theme::PANEL).stroke(edge).inner_margin(egui::Margin::symmetric(16, 0)))
+            .show(ui, |ui| self.header(ui));
+
+        egui::Panel::left("stages")
+            .resizable(false)
+            .exact_size(220.0)
+            .frame(egui::Frame::NONE.fill(theme::PANEL).stroke(edge).inner_margin(egui::Margin::symmetric(10, 12)))
+            .show(ui, |ui| self.sidebar(ui));
 
         egui::Panel::left("editor")
             .resizable(true)
-            .default_size(470.0)
-            .frame(egui::Frame::NONE.fill(theme::PANEL).inner_margin(egui::Margin::same(12)))
+            .default_size(400.0)
+            .frame(egui::Frame::NONE.fill(theme::BG).stroke(edge).inner_margin(egui::Margin::same(12)))
             .show(ui, |ui| self.editor(ui));
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(theme::BG).inner_margin(egui::Margin::same(12)))
+            .frame(egui::Frame::NONE.fill(theme::BG).inner_margin(egui::Margin::same(16)))
             .show(ui, |ui| {
                 self.error_banner(ui);
                 match self.tab {
@@ -506,7 +504,6 @@ impl eframe::App for App {
                     Tab::Link => self.link.show(ui, &self.build),
                     Tab::Elf => self.elf.show(ui, &self.build),
                     Tab::Cpu => self.cpu.show(ui, &self.build),
-                    Tab::Roadmap => views::roadmap::show(ui, &self.cpu),
                 }
             });
     }

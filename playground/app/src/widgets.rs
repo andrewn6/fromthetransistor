@@ -7,7 +7,7 @@ pub fn heading(ui: &mut egui::Ui, text: &str, accent: Color32) {
     ui.horizontal(|ui| {
         let (r, _) = ui.allocate_exact_size(egui::vec2(3.0, 16.0), egui::Sense::hover());
         ui.painter().rect_filled(r, CornerRadius::same(1), accent);
-        ui.label(RichText::new(text).strong().size(15.0));
+        ui.label(RichText::new(text).strong().size(14.0));
     });
 }
 
@@ -22,7 +22,7 @@ pub fn pill(ui: &mut egui::Ui, text: &str, color: Color32) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::hover());
     ui.painter().rect(
         rect,
-        CornerRadius::same(8),
+        CornerRadius::same(3),
         color.gamma_multiply(0.14),
         Stroke::new(1.0, color.gamma_multiply(0.5)),
         StrokeKind::Inside,
@@ -40,9 +40,9 @@ pub fn empty(ui: &mut egui::Ui, text: &str) {
 
 pub fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     egui::Frame::NONE
-        .fill(theme::RAISED)
+        .fill(theme::PANEL)
         .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(CornerRadius::same(6))
+        .corner_radius(CornerRadius::same(4))
         .inner_margin(egui::Margin::same(10))
         .show(ui, add)
         .inner

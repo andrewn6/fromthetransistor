@@ -1,4 +1,4 @@
-// one module per pipeline stage, plus the course roadmap
+// one module per pipeline stage
 
 pub mod asm;
 pub mod ast;
@@ -6,5 +6,4 @@ pub mod cpu;
 pub mod elf;
 pub mod link;
 pub mod preprocess;
-pub mod roadmap;
 pub mod tokens;
