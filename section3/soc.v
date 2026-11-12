@@ -15,8 +15,8 @@ module soc (
     output wire mem_we,
     output wire mem_byte,
     // serial 
-    input wire uart_rx
-    output wire uart_tx 
+    input wire uart_rx,
+    output wire uart_tx,
     output wire halted 
 );
 
@@ -38,7 +38,7 @@ module soc (
     );
 
     // 16-byte uart window at 0x40001000
-    wire uart_sel = (cpu_addr[31:4] == 28'h40001000);
+    wire uart_sel = (cpu_addr[31:4] == 28'h4000100);
     wire [3:0] uart_reg = cpu_addr[3:0];
 
     wire [7:0] rx_byte;
@@ -80,6 +80,6 @@ module soc (
 
     assign mem_addr = cpu_addr;
     assign mem_wdata = cpu_wdata;
-    assign mem-we = cpu_we && !uart_sel;
+    assign mem_we = cpu_we && !uart_sel;
     assign mem_byte = cpu_byte;
 endmodule
