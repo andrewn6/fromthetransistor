@@ -16,7 +16,7 @@ void uputc(int c) {
 int ugetc() {
     int *stat;
     int *data;
-    stat = UART_DATA;
+    stat = UART_STAT;
     data = UART_DATA;
     while ((*stat & RX_VALID) == 0){
     }
