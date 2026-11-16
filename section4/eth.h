@@ -1,4 +1,4 @@
-#define ETH_BASE 0x400020000
+#define ETH_BASE 0x40002000
 #define ETH_CTRL (ETH_BASE + 0x0000)
 #define ETH_STATUS (ETH_BASE + 0x0004)
 #define ETH_TXLEN (ETH_BASE + 0x0008)
@@ -15,10 +15,12 @@
 
 #define ETH_HDRLEN 14 
 
+// note: no volatile - our compiler has no optimizer, nothing gets
+// hoisted or cached, so plain pointers are safe for mmio access
 void eth_send(char *buf, int len) {
-    volatile int *status = (int *)ETH_STATUS;
-    volatile int *txlen = (int *)ETH_TXLEN;
-    volatile int *ctrl = (int *)ETH_CTRL;
+    int *status = (int *)ETH_STATUS;
+    int *txlen = (int *)ETH_TXLEN;
+    int *ctrl = (int *)ETH_CTRL;
     char *txbuf = (char *)ETH_TXBUF;
     int i;
 
@@ -27,13 +29,13 @@ void eth_send(char *buf, int len) {
     for (i = 0; i < len; i++) 
         txbuf[i] = buf[i];
     *txlen = len;
-    *ctrl ETH_CTRL_TX;
+    *ctrl = ETH_CTRL_TX;
 }
 
 int eth_recv(char *buf, int maxlen) {
-    volatile int *status = (int *)ETH_STATUS;
-    volatile int *rxlen  = (int *)ETH_RXLEN;
-    volatile int *ctrl   = (int *)ETH_CTRL;
+    int *status = (int *)ETH_STATUS;
+    int *rxlen  = (int *)ETH_RXLEN;
+    int *ctrl   = (int *)ETH_CTRL;
     char *rxbuf = (char *)ETH_RXBUF;
     int len, i;
 

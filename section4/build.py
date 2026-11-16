@@ -20,6 +20,11 @@ _start:
 .Lhang:
     b .Lhang
 
+@ void jump_to(int addr) - tail-call an address, for the bootloader.
+@ args live in r0, so this is just a bx with a veneer so C can call it
+jump_to:
+    bx r0
+
 @ void putstr(char *s) - semihosting SYS_WRITE0
 putstr:
     mov r1, r0

@@ -102,6 +102,11 @@ class VaArg(Expr):
     ty: Type
 
 @dataclass
+class Cast(Expr):
+    ty: Type
+    operand: Expr
+
+@dataclass
 class BinOp(Expr):
     op: str
     lhs: Expr
@@ -653,20 +658,28 @@ class Parser:
         return SReturn(e)
 
     def parse_decl(self) -> Stmt:
-        # local declaration: type name ['=' init] ';'
-        ty = self.parse_type()
-        name_tok = self.peek()
-        if name_tok is None or name_tok.kind != TID:
-            raise SyntaxError(f"parse: expected declarator, got {self.preview()}")
-        name = name_tok.val
-        self.pos += 1
-        ty = self.parse_array_suffix(ty)
-        init = None
-        if self.peek() == Tok(TO, "="):
+        # local declaration: type name [array] ['=' init]
+        # (',' name [array] ['=' init])* ';'
+        base_ty = self.parse_type()
+        decls = []
+        while True:
+            name_tok = self.peek()
+            if name_tok is None or name_tok.kind != TID:
+                raise SyntaxError(f"parse: expected declarator, got {self.preview()}")
+            name = name_tok.val
             self.pos += 1
-            init = self.parse_expr()
+            ty = self.parse_array_suffix(base_ty)
+            init = None
+            if self.peek() == Tok(TO, "="):
+                self.pos += 1
+                init = self.parse_expr()
+            decls.append(SDecl(ty, name, init))
+            if self.peek() == Tok(TP, ","):
+                self.pos += 1
+                continue
+            break
         self.expect(TP, ";")
-        return SDecl(ty, name, init)
+        return SBlock(decls)
 
     # ----- expressions -----
     # a ladder of parse functions, lowest precedence first. each level parses
@@ -760,7 +773,15 @@ class Parser:
                 self.expect(TP, ")")
                 return Sizeof(ty)
             return Sizeof(self.parse_unary())
-        
+        if t == Tok(TP, "(") and self.type_after_lparen():
+            # a cast: '(' type ')' unary. mirrors the sizeof trick -
+            # type_after_lparen disambiguates from a parenthesized
+            # expression
+            self.expect(TP, "(")
+            ty = self.parse_type()
+            self.expect(TP, ")")
+            return Cast(ty, self.parse_unary())
+
         return self.parse_postfix()
 
     def type_after_lparen(self) -> bool:
@@ -1000,6 +1021,8 @@ def collect_strings(decls: list) -> dict:
         elif isinstance(e, Member):
             visit_expr(e.base)
         elif isinstance(e, (Deref, AddrOf)):
+            visit_expr(e.operand)
+        elif isinstance(e, Cast):
             visit_expr(e.operand)
         elif isinstance(e, Sizeof):
             if not isinstance(e.operand, Type):
@@ -1391,6 +1414,8 @@ class CodeGen:
             return TInt()          # !x and -x are ints
         if isinstance(e, VaArg):
             return decay(e.ty)
+        if isinstance(e, Cast):
+            return e.ty
         if isinstance(e, Call):
             return TInt()          # we do not track return types
         if isinstance(e, BinOp):
@@ -1656,6 +1681,12 @@ class CodeGen:
 
         elif isinstance(e, AddrOf):
             self.gen_lvalue(e.operand)
+
+        elif isinstance(e, Cast):
+            # every type is a word on this target, so a cast is a
+            # pure reinterpret: evaluate the operand, done. the type
+            # only matters to infer_type (deref scaling, etc)
+            self.gen_expr(e.operand)
 
         elif isinstance(e, Deref):
             t = self.infer_type(e)         # element type (char vs word)
