@@ -1,8 +1,8 @@
 `timescale 1ns / 1ps 
 
 module mmu (
-    input wire clk;
-    input wire reset;
+    input wire clk,
+    input wire reset,
 
     input wire en,
     input wire [31:0] ttbr,
@@ -43,16 +43,16 @@ module mmu (
 
     // sequential reset and flush drop every valid bit.
     integer i;
-    always @(posedge or posedge reset) begin 
+    always @(posedge clk or posedge reset) begin 
         if (reset) begin 
             for (i = 0; i < TLB_ENTRIES; i = i + 1)
                 tlb_valid[i] <= 1'b0;
         end else if (tlb_flush) begin 
             for (i = 0; i < TLB_ENTRIES; i = i + 1)
-                tlb_valid[1] <= 1'b0;
+                tlb_valid[i] <= 1'b0;
         end else if (tlb_fill) begin
             tlb_valid[tlb_fill_vpn[4:0]] <= 1'b1;
-            tlb_tagp[tlb_fill_vpn[4:0]] <= tlb_fill_vpn;
+            tlb_tag[tlb_fill_vpn[4:0]] <= tlb_fill_vpn;
             tlb_pte[tlb_fill_vpn[4:0]] <= tlb_fill_pte;
         end 
     end
@@ -66,6 +66,5 @@ module mmu (
     assign mem_byte  = cpu_byte;
     assign cpu_rdata = mem_rdata;
     assign fault     = 1'b0;
-
 
 endmodule
