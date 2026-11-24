@@ -43,7 +43,9 @@ module soc (
         .sram_data_out(cpu_wdata),
         .sram_we(cpu_we),
         .sram_byte(cpu_byte),
-        .halted(halted)
+        .halted(halted),
+        .stall(1'b0),
+        .mem_req()
     );
 
     // 16-byte uart window at 0x40001000

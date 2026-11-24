@@ -31,7 +31,9 @@ module arm7_cpu (
   output reg [31:0] sram_data_out,
   output reg         sram_we,
   output reg         sram_byte,   // 1 = byte access (ldrb/strb)
-  output reg         halted       // svc trap, testbench stops on it
+  output reg         halted,      // svc trap, testbench stops on it
+  input wire stall,
+  output wire mem_req
 );
 
   reg [31:0] pc; // address of the instruction in the fetch 
@@ -45,6 +47,7 @@ module arm7_cpu (
   localparam PHASE_BLOCK = 2'b10;
 
   integer i;
+  
   
 
   // decode & carve the instruction word into named fields 
@@ -292,6 +295,10 @@ module arm7_cpu (
     end
   end
 
+  assign mem_req = (phase == PHASE_FETCH)
+                || (phase == PHASE_EXEC && is_ls && cond_pass)
+                || (phase == PHASE_BLOCK && blk_mask != 16'd0);
+  
   always @(posedge clk) begin
     if (reset) begin
       pc <= 32'h00010000;
@@ -303,7 +310,7 @@ module arm7_cpu (
       blk_addr <= 32'd0;
       for (i = 0; i < 16; i = i + 1)
         regs[i] <= 32'd0;
-    end else if (!halted) begin
+    end else if (!halted && !stall) begin
       case (phase)
         PHASE_FETCH: begin
           instr <= sram_data_in;
