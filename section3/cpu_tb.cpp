@@ -363,7 +363,9 @@ int main(int argc, char** argv) {
     // mmio windows (uart, ethernet) are muxed inside soc.v, so skip
     // them here.
     bool is_mmio = (top->mem_addr >= 0x40001000 && top->mem_addr < 0x40001010)
-                || (top->mem_addr >= 0x40002000 && top->mem_addr < 0x40005000);
+                  || (top->mem_addr >= 0x40002000 && top->mem_addr < 0x40005000)
+                  || (top->mem_addr >= 0x40006000 && top->mem_addr < 0x40006010);
+                  
     if (is_mmio) {
       top->mem_rdata = 0;
     } else if (top->mem_byte) {

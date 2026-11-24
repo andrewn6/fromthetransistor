@@ -29,6 +29,15 @@ module soc (
     inout wire mdio
 );
 
+    wire [31:0] va;
+    wire [31:0] va_wdata;
+    wire [31:0] va_rdata;
+    wire va_we;
+    wire va_byte;
+    wire mem_req;
+    wire stall;
+    wire fault;
+
     wire [31:0] cpu_addr;
     wire [31:0] cpu_wdata;
     wire cpu_we;
@@ -38,14 +47,33 @@ module soc (
     arm7_cpu cpu (
         .clk(clk),
         .reset(reset),
-        .sram_data_in(cpu_rdata),
-        .sram_addr(cpu_addr),
-        .sram_data_out(cpu_wdata),
-        .sram_we(cpu_we),
-        .sram_byte(cpu_byte),
+        .sram_data_in(va_rdata),
+        .sram_addr(va),
+        .sram_data_out(va_wdata),
+        .sram_we(va_we),
+        .sram_byte(va_byte),
         .halted(halted),
-        .stall(1'b0),
-        .mem_req()
+        .stall(stall),
+        .mem_req(mem_req)
+    );
+
+    mmu mmu0(
+        .clk(clk),
+        .reset(reset),
+        .va(va),
+        .cpu_wdata(va_wdata),
+        .cpu_we(va_we),
+        .cpu_byte(va_byte),
+        .mem_req(mem_req),
+        .user(1'b0),
+        .cpu_rdata(va_rdata),
+        .stall(stall),
+        .fault(fault),
+        .pa(cpu_addr),
+        .mem_wdata(cpu_wdata),
+        .mem_we(cpu_we),
+        .mem_byte(cpu_byte),
+        .mem_rdata(cpu_rdata)
     );
 
     // 16-byte uart window at 0x40001000
