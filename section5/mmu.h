@@ -1,5 +1,5 @@
-#define MMU_CTRL 0x400006000
-#define MMU_TTBR 0x400006004
+#define MMU_CTRL 0x40006000
+#define MMU_TTBR 0x40006004
 
 #define PTE_PRESENT 1
 #define PTE_WRITE 2 
@@ -30,4 +30,22 @@ void mmu_enable() {
 void mmu_disable() {
     int *ctrl = (int *)MMU_CTRL;
     *ctrl = 0;
+}
+
+// fault info, valid in an abort handler
+#define MMU_FAR 0x40006008
+#define MMU_FSR 0x4000600C
+#define FSR_RANGE 1
+#define FSR_NOT_PRESENT 2
+#define FSR_READ_ONLY 3
+#define FSR_KERNEL 4
+
+// the runtime's abort stubs call the function stored here, as
+// handler(1) for a data abort, handler(0) for a prefetch abort.
+// on return the faulting access is retried.
+#define ABORT_FN 0x00010034
+
+void mmu_on_abort(int fn) {
+    int *slot = (int *)ABORT_FN;
+    *slot = fn;
 }
