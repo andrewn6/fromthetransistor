@@ -26,10 +26,13 @@ module mmu (
     wire [11:0] page_off = va[PAGE_BITS-1:0];
 
     // ctrl window (0x40006000, mmio, never translated):
-    // +0 CTRL bit0 enable, +4 TTBR (16KB aligned).
+    // +0 CTRL bit0 enable, +4 TTBR (16KB aligned),
+    // +8 FAR fault va, +C FSR fault cause (both read-only).
     // any write to either flushes the tlb.
     reg en;
     reg [31:0] ttbr;
+    reg [31:0] far;
+    reg [2:0] fsr;
 
     wire is_mmio  = (va[31:28] == 4'h4);
     wire ctrl_hit = (va[31:4] == 28'h4000600);
@@ -46,7 +49,8 @@ module mmu (
     end
 
     wire [31:0] ctrl_rdata = (va[3:2] == 2'd0) ? {31'd0, en} :
-                             (va[3:2] == 2'd1) ? ttbr : 32'd0;
+                             (va[3:2] == 2'd1) ? ttbr :
+                             (va[3:2] == 2'd2) ? far : {29'd0, fsr};
 
     // TLB 
     // 32 entries, mapped directly, vpn[4:0] picks the slot 
@@ -77,6 +81,19 @@ module mmu (
                        (!tlb_pte_out[0] ||               // not present
                         (cpu_we && !tlb_pte_out[1]) ||   // read-only
                         (user && !tlb_pte_out[2]));      // kernel only
+    wire [2:0] fault_code = range_fault ? 3'd1 :
+                            !tlb_pte_out[0] ? 3'd2 :
+                            (cpu_we && !tlb_pte_out[1]) ? 3'd3 : 3'd4;
+    
+    always @(posedge clk or posedge reset) begin 
+        if (reset) begin 
+            far <= 32'd0;
+            fsr <= 3'd0;
+        end else if (fault) begin 
+            far <= va;
+            fsr <= fault_code;
+        end 
+    end
 
     // sequential reset and flush drop every valid bit.
     integer i;
@@ -99,7 +116,7 @@ module mmu (
     assign fault     = range_fault || perm_fault;
     assign stall     = walk_now;
     assign pa        = (!en || is_mmio) ? va :
-                       walk_now ? pte_addr : pa_translated;
+                       (walk_now || fault) ? pte_addr : pa_translated;
     assign mem_wdata = cpu_wdata;
     assign mem_we    = cpu_we && !walk_now && !fault && !ctrl_hit;
     assign mem_byte  = cpu_byte && !walk_now;

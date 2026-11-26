@@ -13,6 +13,7 @@ RUNTIME = r"""
 .global _start
 _start:
     ldr sp, =0x00800000    @ set up stack: qemu -kernel boots with sp=0
+    bl __vectors
     bl main
     mov r0, #0x18
     ldr r1, =0x20026
@@ -20,6 +21,47 @@ _start:
 .Lhang:
     b .Lhang
 
+@ abort vectors at 0x1000C (prefetch) and 0x10010 (data). each is
+@ ldr pc, [pc, #0x18], jumping through a word 0x20 further on.
+__vectors:
+    ldr r0, =0x0001000C
+    ldr r1, =0xE59FF018
+    str r1, [r0]
+    str r1, [r0, #4]
+    ldr r1, =__pabt
+    str r1, [r0, #0x20]
+    ldr r1, =__dabt
+    str r1, [r0, #0x24]
+    bx lr
+
+    
+@ abort stubs: save what the faulting code can see, call the c
+@ handler at ABORT_FN (0x10034) with r0 = 1 data / 0 prefetch,
+@ restore, retry the access. subs pc also restores the flags.
+__dabt:
+    push {r0-r12, lr}
+    mov r0, #1
+    bl __abort_call
+    pop {r0-r12, lr}
+    .word 0xE25EF008       @ subs pc, lr, #8
+__pabt:
+    push {r0-r12, lr}
+    mov r0, #0
+    bl __abort_call
+    pop {r0-r12, lr}
+    .word 0xE25EF004       @ subs pc, lr, #4
+__abort_call:
+    ldr r1, =0x00010034
+    ldr r1, [r1]
+    cmp r1, #0
+    beq .Lnohandler
+    bx r1                  @ tail call, handler returns to our caller
+.Lnohandler:
+    mov r0, #0x18          @ no handler: exit, like svc
+    ldr r1, =0x20026
+    svc 0x123456
+
+    
 @ void jump_to(int addr) - tail-call an address, for the bootloader.
 @ args live in r0, so this is just a bx with a veneer so C can call it
 jump_to:

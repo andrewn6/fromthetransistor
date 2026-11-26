@@ -54,7 +54,8 @@ module soc (
         .sram_byte(va_byte),
         .halted(halted),
         .stall(stall),
-        .mem_req(mem_req)
+        .mem_req(mem_req),
+        .abort(fault)
     );
 
     mmu mmu0(

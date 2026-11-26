@@ -10,7 +10,7 @@
 //
 // design:
 //   - fetch/execute and block-transfer phases, one memory access per clock
-//   - no pipeline, no mmu, no interrupts (later subchapters)
+//   - no pipeline, no interrupts. mmu faults abort (section5)
 //   - runs exactly the subset our assembler.py emits:
 //       data processing: and eor sub rsb add sbc rsc tst teq cmp cmn orr mov bic mvn
 //                        (i-bit immediates <= 255, cond suffixes, s-bit on cmp/tst)
@@ -33,7 +33,8 @@ module arm7_cpu (
   output reg         sram_byte,   // 1 = byte access (ldrb/strb)
   output reg         halted,      // svc trap, testbench stops on it
   input wire stall,
-  output wire mem_req
+  output wire mem_req,
+  input wire abort        // mmu fault on this cycle's access
 );
 
   reg [31:0] pc; // address of the instruction in the fetch 
@@ -41,10 +42,17 @@ module arm7_cpu (
   reg [1:0]  phase;
   reg[31:0] regs [0:15];
   reg [3:0] flags;
+  // state the abort overwrites, put back by the subs pc return
+  reg [3:0] saved_flags;
+  reg [31:0] saved_lr;
 
   localparam PHASE_FETCH = 2'b00;
   localparam PHASE_EXEC = 2'b01;
   localparam PHASE_BLOCK = 2'b10;
+
+  // abort vectors, arm offsets from the sram base
+  localparam VEC_PABT = 32'h0001000C;
+  localparam VEC_DABT = 32'h00010010;
 
   integer i;
   
@@ -305,11 +313,22 @@ module arm7_cpu (
       instr <= 32'd0;
       phase <= PHASE_FETCH;
       flags <= 4'd0;
+      saved_flags <= 4'd0;
+      saved_lr <= 32'd0;
       halted <= 1'b0;
       blk_mask <= 16'd0;
       blk_addr <= 32'd0;
       for (i = 0; i < 16; i = i + 1)
         regs[i] <= 32'd0;
+    end else if (!halted && !stall && abort) begin
+      // the faulting access commits nothing. lr follows arm: in fetch
+      // pc is the insn, so lr = insn+4; later pc = insn+4, so insn+8.
+      regs[14] <= pc + 4;
+      saved_lr <= regs[14];
+      saved_flags <= flags;
+      blk_mask <= 16'd0;
+      phase <= PHASE_FETCH;
+      pc <= (phase == PHASE_FETCH) ? VEC_PABT : VEC_DABT;
     end else if (!halted && !stall) begin
       case (phase)
         PHASE_FETCH: begin
@@ -350,8 +369,10 @@ module arm7_cpu (
                 regs[rd] <= alu_out;
               if (dp_wb_pc)
                 pc <= alu_out & 32'hFFFFFFFC;
-              if (dp_wb_flags)
-                flags <= new_flags;
+              if (dp_wb_flags)  // subs pc, ... is the exception return
+                flags <= dp_wb_pc ? saved_flags : new_flags;
+              if (dp_wb_pc && s_bit)
+                regs[14] <= saved_lr;
             end
           end
         end
