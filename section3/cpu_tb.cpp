@@ -313,13 +313,20 @@ int main(int argc, char** argv) {
   BootHost host;
 
   if (eth_mode) {
-    // the image to download: a 5-instruction program, little-endian
-    // words, that writes 42 to results[0] and halts:
-    //   mov r0, #42        e3a0002a
-    //   mov r1, #1         e3a01001
-    //   lsl r1, r1, #20    e1a01a01   -> r1 = 0x00100000
-    //   str r0, [r1]       e5810000   -> results[0] = 42
-    //   svc 0x123456       ef123456   -> halt the sim
+    // the image to download: writes 42 to results[0], copies the mmu
+    // CTRL register to results[1] (proves paging is on at the jump),
+    // then halts:
+    //   mov r0, #42           e3a0002a
+    //   mov r1, #1            e3a01001
+    //   lsl r1, r1, #20       e1a01a01   -> r1 = 0x00100000
+    //   str r0, [r1]          e5810000   -> results[0] = 42
+    //   mov r2, #0x40         e3a02040
+    //   lsl r2, r2, #12       e1a02602
+    //   orr r2, r2, #6        e3822006
+    //   lsl r2, r2, #12       e1a02602   -> r2 = 0x40006000
+    //   ldr r3, [r2]          e5923000
+    //   str r3, [r1, #4]      e5813004   -> results[1] = CTRL
+    //   svc 0x123456          ef123456   -> halt the sim
     // sent in 10-byte fragments (mid-instruction splits) so
     // reassembly and the corrupt+retry path are both exercised
     static const uint8_t image[] = {
@@ -327,6 +334,12 @@ int main(int argc, char** argv) {
       0x01, 0x10, 0xa0, 0xe3,   // mov r1, #1
       0x01, 0x1a, 0xa0, 0xe1,   // lsl r1, r1, #20
       0x00, 0x00, 0x81, 0xe5,   // str r0, [r1]
+      0x40, 0x20, 0xa0, 0xe3,   // mov r2, #0x40
+      0x02, 0x26, 0xa0, 0xe1,   // lsl r2, r2, #12
+      0x06, 0x20, 0x82, 0xe3,   // orr r2, r2, #6
+      0x02, 0x26, 0xa0, 0xe1,   // lsl r2, r2, #12
+      0x00, 0x30, 0x92, 0xe5,   // ldr r3, [r2]
+      0x04, 0x30, 0x81, 0xe5,   // str r3, [r1, #4]
       0x56, 0x34, 0x12, 0xef,   // svc 0x123456
     };
     host.arm(image, sizeof(image), 10);
@@ -365,7 +378,7 @@ int main(int argc, char** argv) {
     bool is_mmio = (top->mem_addr >= 0x40001000 && top->mem_addr < 0x40001010)
                   || (top->mem_addr >= 0x40002000 && top->mem_addr < 0x40005000)
                   || (top->mem_addr >= 0x40006000 && top->mem_addr < 0x40006010);
-                  
+
     if (is_mmio) {
       top->mem_rdata = 0;
     } else if (top->mem_byte) {
@@ -404,9 +417,12 @@ int main(int argc, char** argv) {
     // saw_retry never fired if the ack path worked: the corrupted
     // fragment is caught by parse_ack's rewind, not the timeout
     uint32_t got = read32(RESULTS);
-    bool ok = got == 42;
+    uint32_t ctrl = read32(RESULTS + 4);
+    bool ok = got == 42 && ctrl == 1;
     printf("bootloader: injected program ran, results[0] = %u (%s)\n",
-           got, ok ? "ok" : "FAIL");
+           got, got == 42 ? "ok" : "FAIL");
+    printf("bootloader: paging on at the jump, mmu ctrl = %u (%s)\n",
+           ctrl, ctrl == 1 ? "ok" : "FAIL");
     printf("bootloader: ack-driven retry %s, host timed out %s\n",
            host.sent_upto == host.total ? "clean" : "incomplete",
            host.saw_retry ? "yes (unexpected)" : "no (good)");

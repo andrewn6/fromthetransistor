@@ -1,7 +1,9 @@
 #include "eth.h"
+#include "../section5/mmu.h"
 
-#define DOWNLOAD_ADDR 0x00020000
+#define DOWNLOAD_ADDR 0x00040000
 #define BOOT_ETYPE 0xB007
+#define BOOT_PT 0x0010C000
 #define ACK_ETYPE 0xB008
 #define BOOT_HDRLEN 22
 
@@ -34,6 +36,18 @@ void send_ack(int want) {
     eth_send(buf, 18);
 }
 
+void paging_init() {
+    int *pt = (int *)BOOT_PT;
+    int a; 
+    for (a = 0; a < PT_ENTRIES; a++)
+        pt[a] = 0;
+    for (a = 0x00010000; a < 0x00110000; a = a + PAGE_SIZE)
+        mmu_map(pt, a, a, PTE_PRESENT | PTE_WRITE);
+    for (a = 0x007F0000; a < 0x00800000; a = a + PAGE_SIZE)
+        mmu_map(pt, a, a, PTE_PRESENT | PTE_WRITE);
+    mmu_switch(pt);
+    mmu_enable();
+}
 int main(void) {
     char frame[1536];
     char *dst;
@@ -67,7 +81,8 @@ int main(void) {
         send_ack(have);
     }
 
-    // image complete: jump. jump_to is a runtime asm helper, just
+    paging_init();
+// image complete: jump. jump_to is a runtime asm helper, just
     // bx r0 - the same jump bootrom.asm did. sp is sane because the
     // runtime set it up before main
     jump_to(DOWNLOAD_ADDR);
