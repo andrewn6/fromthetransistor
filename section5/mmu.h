@@ -19,7 +19,7 @@ void mmu_switch(int *pt) {
 
 void mmu_flush() {
     int *ttbr = (int *)MMU_TTBR;
-    *ttbr + *ttbr;
+    *ttbr = *ttbr;
 }
 
 void mmu_enable() {

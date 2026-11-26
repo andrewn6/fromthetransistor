@@ -30,7 +30,7 @@ void uputs(char *s) {
     }
 }
 
-void chec(char *name, int got, int want) {
+void check(char *name, int got, int want) {
     if (got == want) {
         uputs("ok ");
     } else {
@@ -53,7 +53,7 @@ void build(int *pt, int frame) {
         pt[i] = 0;
     map_range(pt, 0x00010000);
     map_range(pt, 0x00100000);
-    mmu_range(pt, 0x007F0000);
+    map_range(pt, 0x007F0000);
     mmu_map(pt, VPAGE, frame, PTE_PRESENT | PTE_WRITE);
 }
 
