@@ -37,6 +37,7 @@ module soc (
     wire mem_req;
     wire stall;
     wire fault;
+    wire cpu_user;
 
     wire [31:0] cpu_addr;
     wire [31:0] cpu_wdata;
@@ -55,7 +56,8 @@ module soc (
         .halted(halted),
         .stall(stall),
         .mem_req(mem_req),
-        .abort(fault)
+        .abort(fault),
+        .user_mode(cpu_user)
     );
 
     mmu mmu0(
@@ -66,7 +68,7 @@ module soc (
         .cpu_we(va_we),
         .cpu_byte(va_byte),
         .mem_req(mem_req),
-        .user(1'b0),
+        .user(cpu_user),
         .cpu_rdata(va_rdata),
         .stall(stall),
         .fault(fault),

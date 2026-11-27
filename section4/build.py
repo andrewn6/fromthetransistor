@@ -67,27 +67,55 @@ __svc:
 __dabt:
     push {r0-r12, lr}
     mov r0, #1
+    mov r1, sp             @ the saved frame, frame[13] is the return lr
     bl __abort_call
     pop {r0-r12, lr}
     .word 0xE25EF008       @ subs pc, lr, #8
 __pabt:
     push {r0-r12, lr}
     mov r0, #0
+    mov r1, sp
     bl __abort_call
     pop {r0-r12, lr}
     .word 0xE25EF004       @ subs pc, lr, #4
 __abort_call:
-    ldr r1, =0x00010034
-    ldr r1, [r1]
-    cmp r1, #0
+    ldr r2, =0x00010034
+    ldr r2, [r2]
+    cmp r2, #0
     beq .Lnohandler
-    bx r1                  @ tail call, handler returns to our caller
+    bx r2                  @ tail call, handler returns to our caller
 .Lnohandler:
     mov r0, #0x18          @ no handler: exit, like svc
     ldr r1, =0x20026
     svc 0x123456
 
     
+@ int get_cpsr() / int get_spsr() / void set_spsr(int psr)
+get_cpsr:
+    .word 0xE10F0000       @ mrs r0, cpsr
+    bx lr
+get_spsr:
+    .word 0xE14F0000       @ mrs r0, spsr
+    bx lr
+set_spsr:
+    .word 0xE16FF000       @ msr spsr_fsxc, r0
+    bx lr
+
+@ void enter_mode(int pc, int sp, int psr) - exception-return to pc with
+@ the mode and flags in psr, e.g. MODE_USR to drop into user mode. sp
+@ is not banked yet, so this sp is the only sp from here on.
+enter_mode:
+    mov lr, r0
+    mov sp, r1
+    .word 0xE16FF002       @ msr spsr_fsxc, r2
+    .word 0xE1B0F00E       @ movs pc, lr
+
+@ void halt() - stop the sim from anywhere, like returning from main
+halt:
+    mov r0, #0x18
+    ldr r1, =0x20026
+    svc 0x123456
+
 @ void jump_to(int addr) - tail-call an address, for the bootloader.
 @ args live in r0, so this is just a bx with a veneer so C can call it
 jump_to:

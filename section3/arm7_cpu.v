@@ -34,7 +34,8 @@ module arm7_cpu (
   output reg         halted,      // svc trap, testbench stops on it
   input wire stall,
   output wire mem_req,
-  input wire abort        // mmu fault on this cycle's access
+  input wire abort,       // mmu fault on this cycle's access
+  output reg user_mode    // 1 = user, drives the mmu's user input
 );
 
   reg [31:0] pc; // address of the instruction in the fetch 
@@ -45,6 +46,7 @@ module arm7_cpu (
   // state the abort overwrites, put back by the subs pc return
   reg [3:0] saved_flags;
   reg [31:0] saved_lr;
+  reg saved_user;
 
   localparam PHASE_FETCH = 2'b00;
   localparam PHASE_EXEC = 2'b01;
@@ -252,6 +254,16 @@ module arm7_cpu (
 
   wire [31:0] bx_target = rm_val & 32'hFFFFFFFC;
 
+  // mrs rd, cpsr/spsr and msr spsr, rm (register form only). psr
+  // layout follows arm: nzcv in [31:28], mode in [4:0].
+  wire is_mrs = (instr[27:23] == 5'b00010) && (instr[21:16] == 6'b001111) &&
+                (instr[11:0] == 12'd0);
+  wire is_msr = (instr[27:20] == 8'b00010110) && (instr[15:4] == 12'hF00);
+  localparam MODE_USR = 5'b10000;
+  localparam MODE_SVC = 5'b10011;
+  wire [31:0] cpsr = {flags, 23'd0, user_mode ? MODE_USR : MODE_SVC};
+  wire [31:0] spsr = {saved_flags, 23'd0, saved_user ? MODE_USR : MODE_SVC};
+
   wire is_mul = is_dp && !i_bit && (instr[27:21] == 7'b0000000) &&
                 (instr[15:12] == 4'b0000) && (instr[7:4] == 4'b1001);
   wire [31:0] rs_val = (rs_reg == 4'hF) ? pc_read : regs[rs_reg];
@@ -316,6 +328,8 @@ module arm7_cpu (
       flags <= 4'd0;
       saved_flags <= 4'd0;
       saved_lr <= 32'd0;
+      saved_user <= 1'b0;
+      user_mode <= 1'b0;
       halted <= 1'b0;
       blk_mask <= 16'd0;
       blk_addr <= 32'd0;
@@ -327,6 +341,8 @@ module arm7_cpu (
       regs[14] <= pc + 4;
       saved_lr <= regs[14];
       saved_flags <= flags;
+      saved_user <= user_mode;
+      user_mode <= 1'b0;
       blk_mask <= 16'd0;
       phase <= PHASE_FETCH;
       pc <= (phase == PHASE_FETCH) ? VEC_PABT : VEC_DABT;
@@ -349,7 +365,16 @@ module arm7_cpu (
                 regs[14] <= pc;
                 saved_lr <= regs[14];
                 saved_flags <= flags;
+                saved_user <= user_mode;
+                user_mode <= 1'b0;
                 pc <= VEC_SVC;
+              end
+            end else if (is_mrs) begin
+              regs[rd] <= instr[22] ? spsr : cpsr;
+            end else if (is_msr) begin
+              if (!user_mode) begin  // user mode has no spsr to write
+                saved_flags <= regs[rm][31:28];
+                saved_user <= (regs[rm][4:0] == MODE_USR);
               end
             end else if (is_bx) begin
               pc <= bx_target;
@@ -379,10 +404,14 @@ module arm7_cpu (
                 regs[rd] <= alu_out;
               if (dp_wb_pc)
                 pc <= alu_out & 32'hFFFFFFFC;
-              if (dp_wb_flags)  // subs pc, ... is the exception return
-                flags <= dp_wb_pc ? saved_flags : new_flags;
-              if (dp_wb_pc && s_bit)
+              // movs/subs pc in kernel mode is the exception return. in
+              // user mode it's a plain s-bit op: no mode, flags or lr leak.
+              if (dp_wb_flags)
+                flags <= (dp_wb_pc && !user_mode) ? saved_flags : new_flags;
+              if (dp_wb_pc && s_bit && !user_mode) begin
                 regs[14] <= saved_lr;
+                user_mode <= saved_user;
+              end
             end
           end
         end

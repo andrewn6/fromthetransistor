@@ -41,8 +41,9 @@ void mmu_disable() {
 #define FSR_KERNEL 4
 
 // the runtime's abort stubs call the function stored here, as
-// handler(1) for a data abort, handler(0) for a prefetch abort.
-// on return the faulting access is retried.
+// handler(1, frame) for a data abort, handler(0, frame) for a prefetch
+// abort. frame is the saved r0-r12, lr; on return the access is retried
+// at frame[13] - 8 (data) or - 4 (prefetch), so frame[13] += 4 skips it.
 #define ABORT_FN 0x00010034
 
 void mmu_on_abort(int fn) {

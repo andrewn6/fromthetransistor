@@ -9,7 +9,7 @@ module mmu (
     input wire cpu_we,
     input wire cpu_byte,
     input wire mem_req,
-    input wire user,   // cpu has no modes yet, soc ties this low
+    input wire user,   // cpu is in user mode
     output wire [31:0] cpu_rdata,
     output wire stall,
     output wire fault,
@@ -36,7 +36,7 @@ module mmu (
 
     wire is_mmio  = (va[31:28] == 4'h4);
     wire ctrl_hit = (va[31:4] == 28'h4000600);
-    wire ctrl_wr  = ctrl_hit && cpu_we;
+    wire ctrl_wr  = ctrl_hit && cpu_we && !user;
 
     always @(posedge clk or posedge reset) begin
         if (reset) begin
@@ -81,7 +81,11 @@ module mmu (
                        (!tlb_pte_out[0] ||               // not present
                         (cpu_we && !tlb_pte_out[1]) ||   // read-only
                         (user && !tlb_pte_out[2]));      // kernel only
+    // user mode can't touch any mmio, only the kernel drives devices
+    wire mmio_fault = user && mem_req && is_mmio;
+
     wire [2:0] fault_code = range_fault ? 3'd1 :
+                            mmio_fault ? 3'd4 :
                             !tlb_pte_out[0] ? 3'd2 :
                             (cpu_we && !tlb_pte_out[1]) ? 3'd3 : 3'd4;
     
@@ -113,10 +117,13 @@ module mmu (
 
     wire [31:0] pa_translated = {tlb_pte_out[31:12], page_off};
 
-    assign fault     = range_fault || perm_fault;
+    assign fault     = range_fault || perm_fault || mmio_fault;
     assign stall     = walk_now;
-    assign pa        = (!en || is_mmio) ? va :
-                       (walk_now || fault) ? pte_addr : pa_translated;
+    // a faulting access is cancelled but still drives the bus, so point
+    // it at the sram base: always real, and never a device register.
+    assign pa        = fault ? 32'h00010000 :
+                       (!en || is_mmio) ? va :
+                       walk_now ? pte_addr : pa_translated;
     assign mem_wdata = cpu_wdata;
     assign mem_we    = cpu_we && !walk_now && !fault && !ctrl_hit;
     assign mem_byte  = cpu_byte && !walk_now;
