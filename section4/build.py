@@ -21,18 +21,44 @@ _start:
 .Lhang:
     b .Lhang
 
-@ abort vectors at 0x1000C (prefetch) and 0x10010 (data). each is
-@ ldr pc, [pc, #0x18], jumping through a word 0x20 further on.
+@ trap vectors at 0x10008 (svc), 0x1000C (prefetch), 0x10010 (data).
+@ each is ldr pc, [pc, #0x18], jumping through a word 0x20 further on.
 __vectors:
-    ldr r0, =0x0001000C
+    ldr r0, =0x00010008
     ldr r1, =0xE59FF018
     str r1, [r0]
     str r1, [r0, #4]
-    ldr r1, =__pabt
+    str r1, [r0, #8]
+    ldr r1, =__svc
     str r1, [r0, #0x20]
-    ldr r1, =__dabt
+    ldr r1, =__pabt
     str r1, [r0, #0x24]
+    ldr r1, =__dabt
+    str r1, [r0, #0x28]
     bx lr
+
+@ int syscall(int n, int a, int b, int c) - svc 0 with args in r0-r3
+syscall:
+    svc 0
+    bx lr
+
+@ svc stub: call the c handler at SVC_FN (0x10038) with r0-r3 as
+@ the caller passed them, hand its r0 back. no handler: return -1.
+@ movs pc, lr returns and restores the flags.
+__svc:
+    push {r1-r12, lr}
+    ldr r12, =0x00010038
+    ldr r12, [r12]
+    cmp r12, #0
+    beq .Lnosvc
+    mov lr, pc
+    bx r12
+    b .Lsvcret
+.Lnosvc:
+    mvn r0, #0
+.Lsvcret:
+    pop {r1-r12, lr}
+    .word 0xE1B0F00E       @ movs pc, lr
 
     
 @ abort stubs: save what the faulting code can see, call the c

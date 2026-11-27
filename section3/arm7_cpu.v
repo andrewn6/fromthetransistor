@@ -50,7 +50,8 @@ module arm7_cpu (
   localparam PHASE_EXEC = 2'b01;
   localparam PHASE_BLOCK = 2'b10;
 
-  // abort vectors, arm offsets from the sram base
+  // trap vectors, arm offsets from the sram base
+  localparam VEC_SVC = 32'h00010008;
   localparam VEC_PABT = 32'h0001000C;
   localparam VEC_DABT = 32'h00010010;
 
@@ -340,7 +341,16 @@ module arm7_cpu (
           phase <= PHASE_FETCH;
           if (cond_pass) begin
             if (is_svc) begin
-              halted <= 1'b1;
+              // svc 0x123456 is semihosting, the sim's exit. any other
+              // svc traps like an abort: lr = insn+4, movs pc, lr returns.
+              if (instr[23:0] == 24'h123456) begin
+                halted <= 1'b1;
+              end else begin
+                regs[14] <= pc;
+                saved_lr <= regs[14];
+                saved_flags <= flags;
+                pc <= VEC_SVC;
+              end
             end else if (is_bx) begin
               pc <= bx_target;
             end else if (is_br) begin
