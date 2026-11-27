@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>toolchain playground</title>
+    <link data-trunk rel="rust" data-bin="playground" data-wasm-opt="z" />
+    <!-- the real toolchain, copied from the repo at build time (trunk watches these) -->
+    <link data-trunk rel="copy-file" href="../../section3/assembler.py" data-target-path="py" />
+    <link data-trunk rel="copy-file" href="../../section4/compiler.py" data-target-path="py" />
+    <link data-trunk rel="copy-file" href="../../section4/linker.py" data-target-path="py" />
+    <link data-trunk rel="copy-file" href="../../section4/build.py" data-target-path="py" />
+    <link data-trunk rel="copy-file" href="../py/bridge.py" data-target-path="py" />
+    <!-- boot roms for the board: the course's, and the playground's stand-in -->
+    <link data-trunk rel="copy-file" href="../../section3/bootrom.asm" data-target-path="py" />
+    <link data-trunk rel="copy-file" href="../boot/rom.s" data-target-path="py" />
+    <style>
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #111317; }
+      canvas { display: block; width: 100%; height: 100%; }
+      #loading { position: absolute; inset: 0; display: grid; place-items: center;
+                 color: #9aa1ac; font: 14px ui-monospace, Menlo, monospace; }
+    </style>
+    <script src="https://cdn.jsdelivr.net/pyodide/v0.27.7/full/pyodide.js"></script>
+    <script>
+      // runs the python toolchain for the rust ui; see playground/app/src/python.rs
+      const FILES = {
+        "/repo/section3/assembler.py": "py/assembler.py",
+        "/repo/section4/compiler.py": "py/compiler.py",
+        "/repo/section4/linker.py": "py/linker.py",
+        "/repo/section4/build.py": "py/build.py",
+        "/repo/playground/py/bridge.py": "py/bridge.py",
+        "/repo/section3/bootrom.asm": "py/bootrom.asm",
+        "/repo/playground/boot/rom.s": "py/rom.s",
+      };
+      // the board's boot roms, in the order the board prefers them
+      const ROMS = ["section3/bootrom.asm", "playground/boot/rom.s"];
+      window.ftt = { ready: false, status: "loading python (pyodide)...", version: 0, files: [] };
+      let pyodide = null;
+      let run = null;
+      let rom = null;
+
+      async function loadFiles() {
+        const loaded = [];
+        for (const [dst, src] of Object.entries(FILES)) {
+          const r = await fetch(src + "?t=" + Date.now(), { cache: "no-store" });
+          if (!r.ok) throw new Error("could not fetch " + src + " (" + r.status + ")");
+          const text = await r.text();
+          pyodide.FS.mkdirTree(dst.slice(0, dst.lastIndexOf("/")));
+          pyodide.FS.writeFile(dst, text);
+          loaded.push(dst.replace("/repo/", "") + " (" + text.split("\n").length + " lines)");
+        }
+        pyodide.runPython(
+          "import sys\nsys.modules.pop('bridge', None)\nsys.path.insert(0, '/repo/playground/py')\n" +
+          "import bridge\nbridge.setup('/repo')");
+        run = pyodide.runPython("bridge.run");
+        rom = pyodide.runPython("bridge.rom");
+        return loaded;
+      }
+
+      window.ftt_reload = async () => {
+        window.ftt.ready = false;
+        window.ftt.status = "reloading the .py files...";
+        try {
+          window.ftt.files = await loadFiles();
+          window.ftt.status = "python " + pyodide.version + ", loaded " + new Date().toLocaleTimeString();
+          window.ftt.version += 1;
+          window.ftt.ready = true;
+        } catch (e) {
+          window.ftt.status = "failed: " + e;
+        }
+      };
+
+      window.ftt_build = (request) => run(request);
+
+      // assemble + link every boot rom at `base` with the repo's own tools
+      window.ftt_roms = (base) => {
+        const files = {};
+        for (const name of ROMS) files[name] = pyodide.FS.readFile("/repo/" + name, { encoding: "utf8" });
+        return rom(JSON.stringify({ base, files }));
+      };
+
+      (async () => {
+        try {
+          pyodide = await loadPyodide();
+          await window.ftt_reload();
+        } catch (e) {
+          window.ftt.status = "pyodide failed to load: " + e;
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <canvas id="playground"></canvas>
+    <div id="loading"><p>loading the toolchain...</p></div>
+  </body>
+</html>
