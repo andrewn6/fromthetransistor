@@ -21,8 +21,9 @@ _start:
 .Lhang:
     b .Lhang
 
-@ trap vectors at 0x10008 (svc), 0x1000C (prefetch), 0x10010 (data).
-@ each is ldr pc, [pc, #0x18], jumping through a word 0x20 further on.
+@ trap vectors at 0x10008 (svc), 0x1000C (prefetch), 0x10010 (data),
+@ 0x10018 (irq). each is ldr pc, [pc, #imm], jumping through a word
+@ further on (irq's is 0x10040, past the c handler slots).
 __vectors:
     ldr r0, =0x00010008
     ldr r1, =0xE59FF018
@@ -35,7 +36,29 @@ __vectors:
     str r1, [r0, #0x24]
     ldr r1, =__dabt
     str r1, [r0, #0x28]
+    ldr r1, =0xE59FF020    @ ldr pc, [pc, #0x20]
+    str r1, [r0, #0x10]
+    ldr r1, =__irq
+    str r1, [r0, #0x38]
     bx lr
+
+@ irq stub: call the c handler at IRQ_FN (0x1003C) with the saved
+@ frame (r0-r12, lr), then resume the interrupted instruction.
+__irq:
+    push {r0-r12, lr}
+    mov r0, sp
+    ldr r2, =0x0001003C
+    ldr r2, [r2]
+    cmp r2, #0
+    beq .Lnoirq
+    mov lr, pc
+    bx r2
+    pop {r0-r12, lr}
+    .word 0xE25EF004       @ subs pc, lr, #4
+.Lnoirq:
+    mov r0, #0x18          @ no handler: exit, like svc
+    ldr r1, =0x20026
+    svc 0x123456
 
 @ int syscall(int n, int a, int b, int c) - svc 0 with args in r0-r3
 syscall:
@@ -90,7 +113,7 @@ __abort_call:
     svc 0x123456
 
     
-@ int get_cpsr() / int get_spsr() / void set_spsr(int psr)
+@ int get_cpsr() / int get_spsr() / void set_spsr(int psr) / void set_cpsr(int psr)
 get_cpsr:
     .word 0xE10F0000       @ mrs r0, cpsr
     bx lr
@@ -99,6 +122,9 @@ get_spsr:
     bx lr
 set_spsr:
     .word 0xE16FF000       @ msr spsr_fsxc, r0
+    bx lr
+set_cpsr:
+    .word 0xE12FF000       @ msr cpsr_fsxc, r0 (flags + i bit)
     bx lr
 
 @ void enter_mode(int pc, int sp, int psr) - exception-return to pc with

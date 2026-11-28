@@ -377,7 +377,8 @@ int main(int argc, char** argv) {
     // them here.
     bool is_mmio = (top->mem_addr >= 0x40001000 && top->mem_addr < 0x40001010)
                   || (top->mem_addr >= 0x40002000 && top->mem_addr < 0x40005000)
-                  || (top->mem_addr >= 0x40006000 && top->mem_addr < 0x40006010);
+                  || (top->mem_addr >= 0x40006000 && top->mem_addr < 0x40006010)
+                  || (top->mem_addr >= 0x40007000 && top->mem_addr < 0x40007010);
 
     if (is_mmio) {
       top->mem_rdata = 0;

@@ -1,0 +1,25 @@
+# de10-nano: cyclone v se 5cseba6u23i7.
+# pins from the de10-nano user manual (fpga_clk1_50, key0, led0-7);
+# check them against your board revision's manual.
+set_global_assignment -name FAMILY "Cyclone V"
+set_global_assignment -name DEVICE 5CSEBA6U23I7
+set_global_assignment -name TOP_LEVEL_ENTITY blink
+set_global_assignment -name VERILOG_FILE blink.v
+set_global_assignment -name PROJECT_OUTPUT_DIRECTORY output_files
+# quartus deadlocks under the vm's x86 emulation when it runs threaded
+set_global_assignment -name NUM_PARALLEL_PROCESSORS 1
+
+set_location_assignment PIN_V11 -to clk50
+set_location_assignment PIN_AH17 -to key0_n
+set_location_assignment PIN_W15 -to led[0]
+set_location_assignment PIN_AA24 -to led[1]
+set_location_assignment PIN_V16 -to led[2]
+set_location_assignment PIN_V15 -to led[3]
+set_location_assignment PIN_AF26 -to led[4]
+set_location_assignment PIN_AE26 -to led[5]
+set_location_assignment PIN_Y16 -to led[6]
+set_location_assignment PIN_AA23 -to led[7]
+
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to clk50
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to key0_n
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to led[*]

@@ -1,0 +1,112 @@
+# mmu handoff - port this to a new chat to continue
+
+## progress log (update this as batches land)
+
+- batch 1 (skeleton): applied to section5/mmu.v by user. NOTE their
+  hand-apply had a port-list semicolon bug - check the file, not chat
+  history.
+- batch 2 (tlb): code sent in chat. VERIFY what's actually on disk:
+  port list for tlb_fill/tlb_fill_vpn/tlb_fill_pte/tlb_flush was seen
+  on disk; the tlb body (arrays, lookup, fill/flush always block,
+  pa translation assigns) may or may not be applied yet. read the
+  file first.
+- batch 3 (walk + cpu stall): code sent but possibly not applied.
+  design: memory is combinational in this soc, so the walk is NOT a
+  state machine - one combinational redirect cycle (walk_now = en &&
+  mem_req && !tlb_hit; stall = walk_now; pa = pte_addr during walk;
+  mem_we/mem_byte masked during walk; fill at the edge with the
+  current vpn + mem_rdata). ALSO requires arm7_cpu.v edits:
+  (a) new ports: input wire stall, output wire mem_req
+  (b) mem_req = (phase==PHASE_FETCH) || (phase==PHASE_EXEC && is_ls
+      && cond_pass) || (phase==PHASE_BLOCK && blk_mask != 0)
+  (c) gate the big sequential block:
+      "end else if (!halted)" -> "end else if (!halted && !stall)"
+  the mem_req exists to prevent phantom walks on stale sram_addr in
+  ALU cycles (would fault once batch 4 lands). first action of the
+  new session: read mmu.v + arm7_cpu.v, figure out what's applied,
+  finish batch 3, lint, then continue with batch 4.
+
+## repo state (2026-11, after bootloader completion)
+
+section 4 complete and verified: compiler (casts + multi-declarator locals
+recently added, no function-pointer typedefs - use asm runtime helpers
+instead), linker, libc, ethernet mac (mii clock domains, crc32 fcs,
+level+ack rx_ready, mdio), bootloader (fragment protocol, go-back-1 acks,
+corrupt-fragment retry proven), host.py laptop sender.
+
+all green:
+- ./obj_dir_eth/eth_sim                       (17/17 mac tests)
+- ./obj_dir_cpu/cpu_sim section4/build/cputest.bin 0x10054          (18/18)
+- ./obj_dir_cpu/cpu_sim section4/build/uarttest.bin 0x10054 --uart "hello"
+- ./obj_dir_cpu/cpu_sim section4/build/bootloader.bin 0x10054 --eth inject
+  (fragment download + retry + downloaded program runs, results[0]=42)
+- uv run host.py --selftest                   (in section4)
+
+build commands (repo root):
+- soc sim: rm -rf obj_dir_cpu && verilator --cc section3/soc.v
+  section3/arm7_cpu.v section2/uart.v section4/ethernet.v --exe
+  section3/cpu_tb.cpp --top-module soc -Mdir obj_dir_cpu -o cpu_sim
+  then make -C obj_dir_cpu -f Vsoc.mk -j4
+- NOTE: obj_dir_cpu lives at REPO ROOT, not section3/
+- C programs: cd section4 && uv run build.py file.c file.elf
+  (elf for qemu, flat .bin for the sim, linked at 0x10054,
+  RUNTIME asm prelude: _start sets sp=0x00800000, calls main, svc-exits,
+  provides putstr/putchar (semihosting), __udivsi3, jump_to(addr)=bx r0)
+
+memory map:
+- sram 0x00010000 + 1MB (image at 0x10054, results at 0x00100000)
+- stack page below sp = 0x00800000
+- uart 0x40001000 (DATA +0, STATUS +4 bit0 rx_valid bit1 tx_ready)
+- eth  0x40002000 window to 0x40005000 (CTRL bit0 tx-go bit1 rx-ack,
+  STATUS bit0 tx_busy bit1 rx_ready bit2 mdio_busy bit3 rx_crc_ok,
+  TXLEN, RXLEN, TXBUF +0x1000, RXBUF +0x2000, MDIO_CTRL +0x10)
+- boot download area 0x00020000 (bootrom and bootloader both use it -
+  collision unresolved)
+
+conventions: lowercase comments, conventional-commit one-liners
+(feat/fix/test/refactor/chore), verify before commit, tb plays both
+sides of any interface (cpu + phy in cpu_tb, host + board in eth test).
+
+## mmu plan (this is the task)
+
+design decisions (already made, keep unless user vetoes):
+- 4KB pages, single-level table: va[11:0] offset, va[31:12] vpn.
+  pte[0] present, pte[1] writable, pte[2] user-ok, pte[31:12] frame.
+  table = 4096 ptes = 16KB at ttbr (kernel sets per process).
+- unified TLB, 32 entries, direct-mapped (cpu has one memory port,
+  fetches and loads/stores share it, no I/D split).
+- hardware walk on miss: mmu sits between cpu and soc decoder, stalls
+  the cpu's access and uses the bus itself to fetch the pte, then
+  completes. no exception-based refill.
+- mmio windows (uart/eth at 0x4000xxxx) bypass translation, hit the
+  decoder unmapped.
+- en==0 = pure pass-through, same clock, zero behavior change. this is
+  what keeps every existing test green while paging is off.
+
+batches (send code one at a time in chat when user says "batch N"):
+1. mmu.v skeleton - ports, va/pte layout, pass-through. standalone lint.
+2. tlb - 32-entry direct-mapped, tag array, pte array, valid bits,
+   combinational lookup, flush input.
+3. walk fsm - on miss: stall cpu, read pte at ttbr + vpn*4 over the
+   bus, refill tlb, retry the access. needs a "busy" handshake so
+   soc/tb hold the cpu's cycle.
+4. faults + ctrl - invalid pte / not-writable store / user violation
+   -> fault output. mmio ctrl regs (enable, ttbr write flushes tlb).
+5. soc.v rewiring - cpu -> mmu -> decoder, mmio bypass in front of
+   translation, ctrl window (suggest 0x40003000).
+6. address-space switch - kernel writes ttbr (auto-flush), that is
+   the whole context switch. document in notes.
+7. mmu_tb.cpp - no cpu: fake sram with a page table, drive vas,
+   verify hit/miss/walk/fault/bypass. verilator --top-module mmu.
+8. paging test on cpu - C program builds a page table in sram,
+   enables mmu, proves identity map + one remapped page + uart mmio
+   still works through VAs. runs via cpu_sim.
+9. data abort into arm7_cpu.v - fault traps like svc (new pc vector,
+   the seed of the OS page-fault handler). only batch touching the core.
+10. notes + regression - verilog-notes.md/project_notes.md updates,
+    self-test questions, all four sims green on the new soc.
+
+per-batch workflow: write code in chat with short explanation, user
+hand-applies (expect typos - check their diff before building), lint
+with verilator --lint-only, verify batch's test, commit with a
+conventional one-liner.

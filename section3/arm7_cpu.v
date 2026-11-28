@@ -35,7 +35,8 @@ module arm7_cpu (
   input wire stall,
   output wire mem_req,
   input wire abort,       // mmu fault on this cycle's access
-  output reg user_mode    // 1 = user, drives the mmu's user input
+  output reg user_mode,   // 1 = user, drives the mmu's user input
+  input wire irq          // level interrupt from the timer
 );
 
   reg [31:0] pc; // address of the instruction in the fetch 
@@ -47,6 +48,8 @@ module arm7_cpu (
   reg [3:0] saved_flags;
   reg [31:0] saved_lr;
   reg saved_user;
+  reg irq_mask;           // psr i bit: 1 = interrupts off
+  reg saved_mask;
 
   localparam PHASE_FETCH = 2'b00;
   localparam PHASE_EXEC = 2'b01;
@@ -56,6 +59,7 @@ module arm7_cpu (
   localparam VEC_SVC = 32'h00010008;
   localparam VEC_PABT = 32'h0001000C;
   localparam VEC_DABT = 32'h00010010;
+  localparam VEC_IRQ  = 32'h00010018;
 
   integer i;
   
@@ -258,11 +262,15 @@ module arm7_cpu (
   // layout follows arm: nzcv in [31:28], mode in [4:0].
   wire is_mrs = (instr[27:23] == 5'b00010) && (instr[21:16] == 6'b001111) &&
                 (instr[11:0] == 12'd0);
-  wire is_msr = (instr[27:20] == 8'b00010110) && (instr[15:4] == 12'hF00);
+  wire is_msr = (instr[27:23] == 5'b00010) && (instr[21:20] == 2'b10) &&
+                (instr[15:4] == 12'hF00);
   localparam MODE_USR = 5'b10000;
   localparam MODE_SVC = 5'b10011;
-  wire [31:0] cpsr = {flags, 23'd0, user_mode ? MODE_USR : MODE_SVC};
-  wire [31:0] spsr = {saved_flags, 23'd0, saved_user ? MODE_USR : MODE_SVC};
+  wire [31:0] cpsr = {flags, 20'd0, irq_mask, 2'd0, user_mode ? MODE_USR : MODE_SVC};
+  wire [31:0] spsr = {saved_flags, 20'd0, saved_mask, 2'd0, saved_user ? MODE_USR : MODE_SVC};
+
+  // interrupts are taken between instructions, in place of a fetch
+  wire irq_take = irq && !irq_mask && (phase == PHASE_FETCH);
 
   wire is_mul = is_dp && !i_bit && (instr[27:21] == 7'b0000000) &&
                 (instr[15:12] == 4'b0000) && (instr[7:4] == 4'b1001);
@@ -329,6 +337,8 @@ module arm7_cpu (
       saved_flags <= 4'd0;
       saved_lr <= 32'd0;
       saved_user <= 1'b0;
+      irq_mask <= 1'b1;
+      saved_mask <= 1'b1;
       user_mode <= 1'b0;
       halted <= 1'b0;
       blk_mask <= 16'd0;
@@ -342,10 +352,22 @@ module arm7_cpu (
       saved_lr <= regs[14];
       saved_flags <= flags;
       saved_user <= user_mode;
+      saved_mask <= irq_mask;
       user_mode <= 1'b0;
+      irq_mask <= 1'b1;
       blk_mask <= 16'd0;
       phase <= PHASE_FETCH;
       pc <= (phase == PHASE_FETCH) ? VEC_PABT : VEC_DABT;
+    end else if (!halted && !stall && irq_take) begin
+      // pc is the next insn; lr = it + 4, so subs pc, lr, #4 resumes it
+      regs[14] <= pc + 4;
+      saved_lr <= regs[14];
+      saved_flags <= flags;
+      saved_user <= user_mode;
+      saved_mask <= irq_mask;
+      user_mode <= 1'b0;
+      irq_mask <= 1'b1;
+      pc <= VEC_IRQ;
     end else if (!halted && !stall) begin
       case (phase)
         PHASE_FETCH: begin
@@ -366,15 +388,23 @@ module arm7_cpu (
                 saved_lr <= regs[14];
                 saved_flags <= flags;
                 saved_user <= user_mode;
+                saved_mask <= irq_mask;
                 user_mode <= 1'b0;
+                irq_mask <= 1'b1;
                 pc <= VEC_SVC;
               end
             end else if (is_mrs) begin
               regs[rd] <= instr[22] ? spsr : cpsr;
             end else if (is_msr) begin
-              if (!user_mode) begin  // user mode has no spsr to write
+              // kernel only. msr cpsr sets flags and the i bit (not the
+              // mode, that goes through spsr + movs); msr spsr sets all.
+              if (!user_mode && instr[22]) begin
                 saved_flags <= regs[rm][31:28];
+                saved_mask <= regs[rm][7];
                 saved_user <= (regs[rm][4:0] == MODE_USR);
+              end else if (!user_mode) begin
+                flags <= regs[rm][31:28];
+                irq_mask <= regs[rm][7];
               end
             end else if (is_bx) begin
               pc <= bx_target;
@@ -411,6 +441,7 @@ module arm7_cpu (
               if (dp_wb_pc && s_bit && !user_mode) begin
                 regs[14] <= saved_lr;
                 user_mode <= saved_user;
+                irq_mask <= saved_mask;
               end
             end
           end

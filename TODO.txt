@@ -1,0 +1,43 @@
+**1-2. intro, bringup**: done (blink, uart)
+
+**3. processor**: done (assembler, arm7 cpu, bootrom)
+- [x] bootrom and bootloader both used 0x20000 for downloads; bootloader now downloads to 0x40000
+
+**4. compiler**: done (compiler, linker, libc + malloc, ethernet, bootloader)
+- The compiler is written in Python, not Haskell as the outline says.
+- The bootloader downloads over a raw ethertype (0xB007), not UDP. Fine unless you want to match the outline.
+
+**5. operating system** (you are here)
+- [x] mmu
+  - [x] batches 1-5: skeleton, tlb, walk, faults/ctrl, soc wiring
+  - [x] batch 6: `mmu.h` helpers
+  - [x] batch 7: mmu tb, 34/34
+  - [x] batch 8: C paging test on the cpu (PAGING OK)
+  - [x] batch 9: data/prefetch abort (cpu trap, far/fsr regs, runtime vectors, ABORT OK)
+  - [-] batch 10: notes and regression (skipped)
+  - [x] bootloader: identity-map sram, enable paging before the jump
+  - [ ] update `MMU_PLAN.txt` (0x40006000, build cmd)
+  - [ ] later: two-level table, asids
+- [ ] cpu prereqs for the os (one batch at a time)
+  - [x] batch A: svc trap (svc 0x123456 still halts, others trap to 0x10008, syscall() helper, SVC OK)
+  - [x] batch B: user/kernel mode (mode bit, drives the mmu's user input, USER OK)
+  - [ ] later: bank sp per mode (traps from user still run on the user stack)
+  - [ ] batch C: simple timer interrupt (for preemption)
+- [ ] os: syscalls (open/read/write/close, fork/execve/wait/sleep/exit, mmap/munmap/mprotect), plus a debug interface
+  - [ ] kernel skeleton: entry, syscall dispatch, printf over uart
+  - [ ] processes: process table, page table per process, fork, exit, wait
+  - [ ] execve: load a program into a fresh address space
+  - [ ] mmap/munmap/mprotect on mmu_map + the abort handler
+  - [ ] files: open/read/write/close, console first, then fat
+- [ ] sd card (verilog) and its driver
+- [ ] fat
+- [ ] init, shell, download, cat, ls, rm
+
+**6. browser**
+- [ ] tcp stack in the kernel, with send/recv/bind/connect syscalls
+- [ ] telnetd
+- [ ] dynamic linking (needs linker changes)
+- [ ] text web browser
+
+**7. physical**: optional, since the outline's intro now says "software only"
+- [ ] jtag bitbang, fpga board, bringup

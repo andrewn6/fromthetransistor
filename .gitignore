@@ -16,3 +16,6 @@ __pycache__/
 
 # local workdirs
 .claude/
+
+notes
+CHAPTERS.md

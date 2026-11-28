@@ -38,6 +38,7 @@ module soc (
     wire stall;
     wire fault;
     wire cpu_user;
+    wire timer_irq;
 
     wire [31:0] cpu_addr;
     wire [31:0] cpu_wdata;
@@ -57,7 +58,8 @@ module soc (
         .stall(stall),
         .mem_req(mem_req),
         .abort(fault),
-        .user_mode(cpu_user)
+        .user_mode(cpu_user),
+        .irq(timer_irq)
     );
 
     mmu mmu0(
@@ -130,6 +132,19 @@ module soc (
         .mdio(mdio)
     );
 
+    wire timer_sel = (cpu_addr[31:4] == 28'h4000700);
+    wire [31:0] timer_rdata;
+
+    timer t (
+        .clk(clk),
+        .reset(reset),
+        .addr(cpu_addr[3:0]),
+        .wdata(cpu_wdata),
+        .we(timer_sel && cpu_we),
+        .rdata(timer_rdata),
+        .irq(timer_irq)
+    );
+
     always @(*) begin 
         if (uart_sel) begin 
             case (uart_reg)
@@ -139,6 +154,8 @@ module soc (
             endcase 
         end else if (eth_sel) begin 
             cpu_rdata = eth_rdata;
+        end else if (timer_sel) begin 
+            cpu_rdata = timer_rdata;
         end else begin
             cpu_rdata = mem_rdata;
         end
@@ -147,6 +164,6 @@ module soc (
 
     assign mem_addr = cpu_addr;
     assign mem_wdata = cpu_wdata;
-    assign mem_we = cpu_we && !uart_sel && !eth_sel;
+    assign mem_we = cpu_we && !uart_sel && !eth_sel && !timer_sel;
     assign mem_byte = cpu_byte;
 endmodule
